@@ -129,6 +129,22 @@ local commandTypes = {
 
 local stateCommands = include("LuaRules/Configs/state_commands.lua")
 
+-- Factories that can build a unit using the loopback attack toggle get the
+-- toggle too. Units they build inherit the factory's current state.
+local loopAttackFactoryDefs = {}
+for unitDefID, ud in pairs(UnitDefs) do
+	if (ud.isFactory or ud.customParams.child_of_factory) and ud.buildOptions then
+		for i = 1, #ud.buildOptions do
+			local behaviour = unitAIBehaviour[ud.buildOptions[i]]
+			if behaviour and behaviour.alternateStateToggle == "loopAttack" and not behaviour.onlyIdleHandling then
+				loopAttackFactoryDefs[unitDefID] = true
+				break
+			end
+		end
+	end
+end
+local factoryLoopAttackState = {}
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 ---- Utilities
@@ -1215,6 +1231,17 @@ end
 --------------------------------------------------------------------------------
 -- Command Handling
 
+local function FactoryLoopAttackToggle(unitID, state)
+	local cmdDescID = spFindUnitCmdDesc(unitID, CMD_LOOP_ATTACK)
+	if not cmdDescID then
+		return
+	end
+	local desc = commandTypes.loopAttack.desc
+	desc.params[1] = state
+	spEditUnitCmdDesc(unitID, cmdDescID, {params = desc.params})
+	factoryLoopAttackState[unitID] = state
+end
+
 local function AIToggleCommand(unitID, cmdParams, cmdOptions)
 	if unit[unitID] or externallyHandledUnit[unitID] then
 		local state = cmdParams[1]
@@ -1245,6 +1272,10 @@ end
 function gadget:AllowCommand(unitID, unitDefID, teamID, cmdID, cmdParams, cmdOptions)
 	if (cmdID ~= CMD_UNIT_AI and cmdID ~= CMD_LOOP_ATTACK) then
 		return true  -- command was not used
+	end
+	if cmdID == CMD_LOOP_ATTACK and factoryLoopAttackState[unitID] then
+		FactoryLoopAttackToggle(unitID, (cmdParams[1] == 1 and 1) or 0)
+		return false  -- command was used
 	end
 	AIToggleCommand(unitID, cmdParams, cmdOptions)
 	return false  -- command was used
@@ -1316,6 +1347,14 @@ function gadget:UnitGiven(unitID, unitDefID, teamID, oldTeamID)
 end
 
 function gadget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
+	if loopAttackFactoryDefs[unitDefID] and not factoryLoopAttackState[unitID] then
+		local desc = commandTypes.loopAttack.desc
+		desc.params[1] = 0
+		spInsertUnitCmdDesc(unitID, desc)
+		FactoryLoopAttackToggle(unitID, 0)
+		return
+	end
+	
 	-- add swarmers
 	if not unitAIBehaviour[unitDefID] then
 		return
@@ -1354,7 +1393,10 @@ function gadget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
 	}
 	
 	if not behaviour.onlyIdleHandling then
-		if (behaviour.defaultAIState == 1) then
+		local factoryState = builderID and behaviour.alternateStateToggle == "loopAttack" and factoryLoopAttackState[builderID]
+		if factoryState then
+			AIToggleCommand(unitID, {factoryState}, {})
+		elseif (behaviour.defaultAIState == 1) then
 			AIToggleCommand(unitID, {1}, {})
 		else
 			AIToggleCommand(unitID, {0}, {})
@@ -1363,6 +1405,7 @@ function gadget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
 end
 
 function gadget:UnitDestroyed(unitID, unitDefID, unitTeam)
+	factoryLoopAttackState[unitID] = nil
 	if externallyHandledUnit[unitID] then
 		externallyHandledUnit[unitID] = nil
 	end

@@ -79,6 +79,11 @@ local tooltips = {
 		[0] = "Disabled",
 		[1] = "Enabled",
 	},
+	loop_attack = {
+		[-1] = "Inherit from factory",
+		[0] = "Strafe",
+		[1] = "Loopback",
+	},
 	flylandstate = {
 		[-1] = "Inherit from factory",
 		[0] = "Fly when idle",
@@ -999,14 +1004,42 @@ local function addUnit(defName, path)
 				path = path,
 			}
 			options_order[#options_order+1] = defName .. "_tactical_ai_2"
-		elseif tacticalAIUnits[defName].commandType == "loopback_attack" then
-			options[defName .. "_loop_attack"] = {
-				name = "  Attack Style: check the box to have the plane loop attack and uncheck for strafe.",
-				type = 'bool',
-				value = planeStandoffUnits[defName].value,
+		elseif tacticalAIUnits[defName].commandType == "loopAttack" then
+			options[defName .. "_loop_attack_1"] = {
+				name = "  Attack Style",
+				desc = "Values: inherit from factory, strafe, loopback",
+				type = 'number',
+				value = -1,
+				min = -1,
+				max = 1,
+				step = 1,
 				path = path,
+				tooltipFunction = tooltipFunc.loop_attack,
 			}
-			options_order[#options_order+1] = defName .. "_loop_attack"
+			options_order[#options_order+1] = defName .. "_loop_attack_1"
+		end
+	elseif ud.isFactory or ud.customParams.child_of_factory then
+		local buildsLoopAttack = false
+		for i = 1, #ud.buildOptions do
+			local buildee = tacticalAIUnits[UnitDefs[ud.buildOptions[i]].name]
+			if buildee and buildee.commandType == "loopAttack" then
+				buildsLoopAttack = true
+				break
+			end
+		end
+		if buildsLoopAttack then
+			options[defName .. "_loop_attack_1"] = {
+				name = "  Attack Style for factory",
+				desc = "Values: strafe, loopback",
+				type = 'number',
+				value = 0,
+				min = 0,
+				max = 1,
+				step = 1,
+				path = path,
+				tooltipFunction = tooltipFunc.loop_attack,
+			}
+			options_order[#options_order+1] = defName .. "_loop_attack_1"
 		end
 	end
 	
@@ -1547,7 +1580,25 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
 		end
 	
 		QueueState(name, "tactical_ai_2", CMD_UNIT_AI, orderArray)
-		QueueState(name, "loop_attack", CMD_LOOP_ATTACK, orderArray)
+		value = GetStateValue(name, "loop_attack_1")
+		if value == -1 then
+			local trueBuilder = false
+			if builderID then
+				local bdid = Spring.GetUnitDefID(builderID)
+				if UnitDefs[bdid] and (UnitDefs[bdid].isFactory or UnitDefs[bdid].customParams.child_of_factory) then
+					trueBuilder = true
+					-- inheritance handled in unit_tactical_ai gadget
+				end
+			end
+			if trueBuilder then
+				value = nil
+			else -- inherit from factory def's start state, not the current state of any specific factory unit
+				value = GetFactoryDefState(name, "loop_attack_1")
+			end
+		end
+		if value then
+			orderArray[#orderArray + 1] = {CMD_LOOP_ATTACK, {value}, CMD.OPT_SHIFT}
+		end
 		
 		value = GetStateValue(name, "tactical_ai_transport")
 		if value and WG.AddTransport then
