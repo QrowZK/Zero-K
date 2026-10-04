@@ -48,7 +48,7 @@ return { planesupport = {
   metalCost              = 250,
   noAutoFire             = false,
   noChaseCategory        = [[TERRAFORM SATELLITE]],
-  objectName             = [[bomberstrike.s3o]],
+  objectName             = [[planesupport.s3o]],
   script                 = [[planesupport.lua]],
   selfDestructAs         = [[GUNSHIPEX]],
 
