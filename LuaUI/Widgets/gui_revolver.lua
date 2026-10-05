@@ -148,6 +148,7 @@ local HUD_DEFAULT = {fx = 1 - 210/1920, fy = 270/1080}
 local LEDGER_DEFAULT = {fx = 20/1920, fy = 1 - 240/1080}
 local hud = {fx = HUD_DEFAULT.fx, fy = HUD_DEFAULT.fy, radius = 92, chamber = 30, scale = 1}
 local ledgerPanel = {fx = LEDGER_DEFAULT.fx, fy = LEDGER_DEFAULT.fy, w = 380, h = 226, scale = 1}
+local menuPanel = {fx = 0.5, fy = 0.5} -- centre of the feature menu; dragged by its title bar
 local dragging -- panel being dragged or clicked: {what, x0, y0, fx0, fy0, moved, onClick}
 
 local AimOf, Watch
@@ -296,6 +297,7 @@ options = {
 	reset_positions = {name = 'Reset cylinder and ledger positions and sizes', type = 'button', path = PATH.grip, OnChange = function()
 		hud.fx, hud.fy = HUD_DEFAULT.fx, HUD_DEFAULT.fy
 		ledgerPanel.fx, ledgerPanel.fy = LEDGER_DEFAULT.fx, LEDGER_DEFAULT.fy
+		menuPanel.fx, menuPanel.fy = 0.5, 0.5
 		ResetSizes()
 	end},
 	open_menu = {name = 'Open Revolver menu', desc = 'Switch Revolver features on and off. Also opens from the middle of the cylinder.', type = 'button', path = PATH.grip, OnChange = function() ToggleMenu() end},
@@ -2517,7 +2519,7 @@ end
 
 function widget:GetConfigData()
 	return {hudX = hud.fx, hudY = hud.fy, ledgerX = ledgerPanel.fx, ledgerY = ledgerPanel.fy,
-		hudSize = options.hud_size.value, ledgerSize = options.ledger_size.value}
+		hudSize = options.hud_size.value, ledgerSize = options.ledger_size.value, menuX = menuPanel.fx, menuY = menuPanel.fy}
 end
 
 function widget:SetConfigData(data)
@@ -2530,6 +2532,7 @@ function widget:SetConfigData(data)
 	end
 	hud.fx, hud.fy = Fraction(data.hudX, HUD_DEFAULT.fx), Fraction(data.hudY, HUD_DEFAULT.fy)
 	ledgerPanel.fx, ledgerPanel.fy = Fraction(data.ledgerX, LEDGER_DEFAULT.fx), Fraction(data.ledgerY, LEDGER_DEFAULT.fy)
+	menuPanel.fx, menuPanel.fy = Fraction(data.menuX, 0.5), Fraction(data.menuY, 0.5)
 	for key, saved in pairs({hud_size = data.hudSize, ledger_size = data.ledgerSize}) do
 		local v = tonumber(saved)
 		if v and v >= options[key].min and v <= options[key].max then
@@ -3153,8 +3156,9 @@ local function MenuLayout()
 	local rowH = 20*k
 	local w = 440*k
 	local h = #rows*rowH + 36*k
-	local x = floor(vsx*0.5 - w*0.5)
-	local top = floor(vsy*0.5 + h*0.5)
+	-- Kept whole on screen
+	local x = floor(max(0, min(vsx - w, vsx*menuPanel.fx - w*0.5)))
+	local top = floor(max(min(h, vsy), min(vsy, vsy*menuPanel.fy + h*0.5)))
 	for i = 1, #rows do
 		rows[i].y1 = top - 30*k - i*rowH
 		rows[i].y2 = rows[i].y1 + rowH
@@ -3180,7 +3184,7 @@ local function DrawMenu()
 	local mx, my = Spring.GetMouseState()
 	D.Panel(x, top - h, x + w, top, 8*k)
 	Text("Revolver features", x + 12*k, top - 17*k, 14*k, "vo", COLOR.text)
-	Text("click to change", x + w - 12*k, top - 17*k, 9*k, "rvo", COLOR.faint)
+	Text("drag here to move, click a row to change", x + w - 12*k, top - 17*k, 9*k, "rvo", COLOR.faint)
 	for i = 1, #rows do
 		local r = rows[i]
 		local midY = (r.y1 + r.y2)*0.5
@@ -3563,6 +3567,8 @@ function D.SettlePositions()
 	hud.fx, hud.fy = cx/vsx, cy/vsy
 	local lx, ly = LedgerRect()
 	ledgerPanel.fx, ledgerPanel.fy = lx/vsx, ly/vsy
+	local _, mx, top, w, h = MenuLayout()
+	menuPanel.fx, menuPanel.fy = (mx + w*0.5)/vsx, (top - h*0.5)/vsy
 end
 
 local function LedgerHit(x, y)
@@ -3653,8 +3659,17 @@ function widget:MousePress(x, y, button)
 	if button ~= 1 then
 		return false
 	end
-	if menuOpen and MenuClick(x, y) then
-		return true
+	if menuOpen then
+		local _, mx, top, w, h, k = MenuLayout()
+		if x >= mx and x <= mx + w and y <= top and y >= top - 28*k then
+			-- Title bar: drag the menu
+			dragging = {what = menuPanel, x0 = x, y0 = y, fx0 = (mx + w*0.5)/Spring.GetViewGeometry(),
+				fy0 = (top - h*0.5)/select(2, Spring.GetViewGeometry()), onClick = function() end}
+			return true
+		end
+		if MenuClick(x, y) then
+			return true
+		end
 	end
 	D.SettlePositions()
 	local grip = GripHit(x, y)
