@@ -1592,6 +1592,42 @@ local function OrderAttack(group)
 	group.phase = "attack"
 end
 
+-- Send Magpies home. The pad gadget refuses rearm orders from Magpies with full ammo and health
+-- (a wing whose target died before it fired), so those fly back over a pad and stay chambered.
+local function SendHome(list)
+	local full = {}
+	for i = 1, #list do
+		local unitID = list[i]
+		local ammo, noAmmo = ReadAmmo(unitID)
+		local health, maxHealth = Spring.GetUnitHealth(unitID)
+		local padID = next(pads) and ChoosePad(unitID)
+		local mag = magpies[unitID]
+		if noAmmo ~= 0 or ammo < 1 or (health and maxHealth and health <= maxHealth - 1) then
+			if padID then
+				if mag then
+					mag.pad = padID
+				end
+				Spring.GiveOrderToUnit(unitID, C.REARM, {padID}, 0)
+			else
+				Spring.GiveOrderToUnit(unitID, C.FIND_PAD, {}, 0)
+			end
+		else
+			local px, py, pz
+			if padID then
+				px, py, pz = Spring.GetUnitPosition(padID)
+			end
+			if px then
+				Spring.GiveOrderToUnit(unitID, C.MOVE, {px, py, pz}, 0)
+			else
+				full[#full + 1] = unitID
+			end
+		end
+	end
+	if #full > 0 then
+		Spring.GiveOrderToUnitArray(full, CMD.STOP, {}, 0)
+	end
+end
+
 local function ReleaseGroup(group, home)
 	local list = UnitList(group.units)
 	for i = 1, #list do
@@ -1605,7 +1641,7 @@ local function ReleaseGroup(group, home)
 		end
 	end
 	if home and #list > 0 then
-		Spring.GiveOrderToUnitArray(list, C.FIND_PAD, {}, 0)
+		SendHome(list)
 	end
 	groups[group.id] = nil
 end
@@ -1873,7 +1909,7 @@ function Recall()
 		end
 	end
 	if #list > 0 then
-		Spring.GiveOrderToUnitArray(list, C.FIND_PAD, {}, 0)
+		SendHome(list)
 	end
 	return list
 end
