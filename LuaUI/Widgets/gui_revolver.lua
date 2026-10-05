@@ -18,39 +18,18 @@ end
 --------------------------------------------------------------------------------
 -- Speedups
 
-local spGetUnitDefID           = Spring.GetUnitDefID
-local spGetUnitAllyTeam        = Spring.GetUnitAllyTeam
-local spGetUnitHealth          = Spring.GetUnitHealth
-local spGetUnitPosition        = Spring.GetUnitPosition
-local spGetUnitRulesParam      = Spring.GetUnitRulesParam
-local spGetUnitCurrentCommand  = Spring.GetUnitCurrentCommand
-local spGetUnitStates          = Spring.GetUnitStates
-local spGetUnitIsDead          = Spring.GetUnitIsDead
-local spValidUnitID            = Spring.ValidUnitID
-local spGiveOrderToUnitArray   = Spring.GiveOrderToUnitArray
-local spGiveOrderToUnit        = Spring.GiveOrderToUnit
-local spGetMouseState          = Spring.GetMouseState
-local spTraceScreenRay         = Spring.TraceScreenRay
-local spIsPosInLos             = Spring.IsPosInLos
-local spGetGroundHeight        = Spring.GetGroundHeight
 
 local floor, ceil, sqrt, min, max = math.floor, math.ceil, math.sqrt, math.min, math.max
 local pi, cos, sin = math.pi, math.cos, math.sin
 
-local CMD_ATTACK      = CMD.ATTACK
-local CMD_MOVE        = CMD.MOVE
-local CMD_FIRE_STATE  = CMD.FIRE_STATE
-local CMD_OPT_SHIFT   = CMD.OPT_SHIFT
-
-local customCmds      = VFS.Include("LuaRules/Configs/customcmds.lua")
-local CMD_REARM       = customCmds.REARM
-local CMD_FIND_PAD    = customCmds.FIND_PAD
-local CMD_RETREAT     = customCmds.RETREAT
-local CMD_LOOP_ATTACK = customCmds.LOOP_ATTACK
-local CMD_SET_TARGET  = customCmds.UNIT_SET_TARGET
-
-local FIRESTATE_HOLD = 0
-local FIRESTATE_FREE = 2
+local customCmds = VFS.Include("LuaRules/Configs/customcmds.lua")
+-- Commands and fire states (a table: the main chunk is near Lua's 200-local limit)
+local C = {
+	ATTACK = CMD.ATTACK, MOVE = CMD.MOVE, FIRE_STATE = CMD.FIRE_STATE, OPT_SHIFT = CMD.OPT_SHIFT,
+	REARM = customCmds.REARM, FIND_PAD = customCmds.FIND_PAD, RETREAT = customCmds.RETREAT,
+	LOOP_ATTACK = customCmds.LOOP_ATTACK, SET_TARGET = customCmds.UNIT_SET_TARGET,
+	HOLD = 0, FREE = 2,
+}
 
 local defs = VFS.Include("LuaUI/Configs/revolver_defs.lua")
 
@@ -58,8 +37,7 @@ local defs = VFS.Include("LuaUI/Configs/revolver_defs.lua")
 --------------------------------------------------------------------------------
 -- Unit data
 
-local MAGPIE_NAME = "planesupport"
-local magpieDefID = UnitDefNames[MAGPIE_NAME] and UnitDefNames[MAGPIE_NAME].id
+local magpieDefID = UnitDefNames.planesupport and UnitDefNames.planesupport.id
 
 local WING_COUNT = 6
 local WING_LETTER = {"A", "B", "C", "D", "E", "F"}
@@ -165,14 +143,16 @@ end
 -- Options
 
 -- Positions are fractions of the screen so they survive resolution changes. Both panels can be dragged.
-local HUD_DEFAULT = {fx = 1 - 160/1920, fy = 220/1080}
-local LEDGER_DEFAULT = {fx = 20/1920, fy = 1 - 260/1080}
-local hud = {fx = HUD_DEFAULT.fx, fy = HUD_DEFAULT.fy, radius = 92, chamber = 30}
-local ledgerPanel = {fx = LEDGER_DEFAULT.fx, fy = LEDGER_DEFAULT.fy, w = 380, h = 220}
+-- Sizes are at 1080p and 100%; both panels scale with screen height and their size option (mouse wheel over a panel).
+local HUD_DEFAULT = {fx = 1 - 210/1920, fy = 270/1080}
+local LEDGER_DEFAULT = {fx = 20/1920, fy = 1 - 240/1080}
+local hud = {fx = HUD_DEFAULT.fx, fy = HUD_DEFAULT.fy, radius = 92, chamber = 30, scale = 1}
+local ledgerPanel = {fx = LEDGER_DEFAULT.fx, fy = LEDGER_DEFAULT.fy, w = 380, h = 226, scale = 1}
 local dragging -- panel being dragged or clicked: {what, x0, y0, fx0, fy0, moved, onClick}
 
+local AimOf, Watch
 local Fire, Mark, ClearMarks, Recall, SelectWing, SelectReady, SetApproach, PoolPartial, ToggleCalibration
-local ToggleMenu, AssignSelected
+local ToggleMenu, AssignSelected, ResetSizes
 
 local ROOT = 'Settings/Unit Behaviour/Revolver'
 local PATH = {
@@ -192,7 +172,7 @@ end
 options_path = ROOT
 options_order = {
 	-- Cylinder
-	'auto_wing', 'wing_size', 'assign_mode', 'ready_ammo', 'ready_health', 'spare_wing', 'show_hud', 'wing_labels', 'fleet_advisor',
+	'auto_wing', 'wing_size', 'assign_mode', 'ready_ammo', 'ready_health', 'spare_wing', 'show_hud', 'hud_size', 'wing_labels', 'fleet_advisor',
 	-- Reload
 	'pad_balance', 'retreat_state',
 	-- Sights
@@ -200,9 +180,9 @@ options_order = {
 	-- Trigger
 	'hold_fire', 'release_near_target', 'time_on_target', 'staging_distance', 'rotate_fire',
 	-- Radar
-	'threat_map', 'route_lines', 'stale_intel', 'stale_seconds', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'stockpile_speed', 'stockpile_cap', 'reload_tracking',
+	'threat_map', 'threat_style', 'path_card', 'route_lines', 'stale_intel', 'stale_seconds', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'stockpile_speed', 'stockpile_cap', 'reload_tracking',
 	-- Ledger
-	'ledger_tracking', 'show_ledger', 'ledger_view', 'career_history', 'export_csv',
+	'ledger_tracking', 'show_ledger', 'ledger_size', 'ledger_view', 'career_history', 'export_csv',
 	-- Grip
 	'sounds', 'reset_positions', 'open_menu', 'fire', 'mark', 'clear_marks', 'recall', 'select_ready',
 	'select_1', 'select_2', 'select_3', 'select_4', 'select_5', 'select_6',
@@ -224,6 +204,7 @@ options = {
 	ready_health = {name = 'Ready at health (%)', desc = 'A wing is chambered when its average health reaches this.', type = 'number', value = 70, min = 10, max = 100, step = 5, path = PATH.cylinder},
 	spare_wing = Switch('Use wing F as the spare wing', 'Half-empty Magpies are gathered into wing F so full wings stay chambered.', false, PATH.cylinder),
 	show_hud = Switch('Show cylinder', nil, true, PATH.cylinder),
+	hud_size = {name = 'Cylinder size (%)', desc = 'Also: mouse wheel over the cylinder.', type = 'number', value = 140, min = 60, max = 300, step = 10, path = PATH.cylinder},
 	wing_labels = Switch('Wing labels over Magpies', nil, true, PATH.cylinder),
 	fleet_advisor = Switch('Fleet and pad advisor', 'Pad slots against what the fleet needs, under the cylinder and in the ledger.', true, PATH.cylinder),
 
@@ -270,6 +251,21 @@ options = {
 
 	-- Radar
 	threat_map = Switch('Anti-air threat map', nil, true, PATH.radar),
+	threat_style = {
+		name = 'Threat map style', desc = 'Shaded: see-through discs, darker where coverage overlaps.', type = 'radioButton', value = 'fill', path = PATH.radar,
+		items = {
+			{key = 'fill', name = 'Shaded'},
+			{key = 'outline', name = 'Outlines'},
+		},
+	},
+	path_card = {
+		name = 'Flight path card', desc = 'With Magpies selected, shows what a straight flight to the cursor would cross. While ordering: during a move, attack, fight or patrol order.', type = 'radioButton', value = 'command', path = PATH.radar,
+		items = {
+			{key = 'command', name = 'While ordering'},
+			{key = 'always', name = 'Always'},
+			{key = 'off', name = 'Off'},
+		},
+	},
 	route_lines = Switch('Route lines with risk', 'Lines from wings to their targets, coloured by expected damage per Magpie.', true, PATH.radar),
 	stale_intel = Switch('Shade unseen areas on routes', 'Shades parts of a route nobody on your team has seen recently.', true, PATH.radar),
 	stale_seconds = {name = 'Unseen after (s)', type = 'number', value = 60, min = 10, max = 300, step = 10, path = PATH.radar},
@@ -284,6 +280,7 @@ options = {
 	-- Ledger
 	ledger_tracking = Switch('Record sorties', nil, true, PATH.ledger),
 	show_ledger = Switch('Show ledger', nil, false, PATH.ledger),
+	ledger_size = {name = 'Ledger size (%)', desc = 'Also: mouse wheel over the ledger.', type = 'number', value = 120, min = 60, max = 300, step = 10, path = PATH.ledger},
 	ledger_view = {
 		name = 'Ledger graph', type = 'radioButton', value = 'runs', path = PATH.ledger,
 		items = {
@@ -296,9 +293,10 @@ options = {
 
 	-- Grip
 	sounds = Switch('Sounds', nil, true, PATH.grip),
-	reset_positions = {name = 'Reset cylinder and ledger positions', type = 'button', path = PATH.grip, OnChange = function()
+	reset_positions = {name = 'Reset cylinder and ledger positions and sizes', type = 'button', path = PATH.grip, OnChange = function()
 		hud.fx, hud.fy = HUD_DEFAULT.fx, HUD_DEFAULT.fy
 		ledgerPanel.fx, ledgerPanel.fy = LEDGER_DEFAULT.fx, LEDGER_DEFAULT.fy
+		ResetSizes()
 	end},
 	open_menu = {name = 'Open Revolver menu', desc = 'Switch Revolver features on and off. Also opens from the middle of the cylinder.', type = 'button', path = PATH.grip, OnChange = function() ToggleMenu() end},
 	fire = {name = 'Fire', desc = 'Send chambered Magpies at the marked targets, or the enemy under the cursor.', type = 'button', path = PATH.grip, OnChange = function() Fire() end},
@@ -322,7 +320,7 @@ local MENU = {
 	{title = 'Reload', keys = {'pad_balance', 'retreat_state'}},
 	{title = 'Sights', keys = {'show_card', 'live_correction', 'allocate', 'horizon', 'auto_style', 'slow_chain', 'kill_confirm'}},
 	{title = 'Trigger', keys = {'hold_fire', 'release_near_target', 'time_on_target', 'rotate_fire'}},
-	{title = 'Radar', keys = {'threat_map', 'route_lines', 'stale_intel', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'reload_tracking'}},
+	{title = 'Radar', keys = {'threat_map', 'threat_style', 'path_card', 'route_lines', 'stale_intel', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'reload_tracking'}},
 	{title = 'Ledger', keys = {'ledger_tracking', 'show_ledger', 'ledger_view', 'career_history', 'export_csv'}},
 	{title = 'Grip', keys = {'sounds'}},
 }
@@ -346,7 +344,7 @@ local marks = {}       -- ordered list of enemy unitIDs
 local groups = {}      -- active attack groups, groupID -> group
 local runs = {}        -- ledger, in order
 local runByWing = {}   -- wing -> open run for flights Revolver did not launch
-local lastHit = {}     -- enemy unitID -> {run = run, frame = n}
+local struck = {}      -- enemy unitID -> health watch that credits damage and kills to runs
 local reloadSeen = {}  -- enemy unitID -> frame its long-reload weapon fired at us
 local alerts = {}      -- {text, frame}
 local alertCooldown = {}
@@ -379,8 +377,8 @@ local function Dist2D(x1, z1, x2, z2)
 end
 
 local function UnitDist2D(a, b)
-	local ax, _, az = spGetUnitPosition(a)
-	local bx, _, bz = spGetUnitPosition(b)
+	local ax, _, az = Spring.GetUnitPosition(a)
+	local bx, _, bz = Spring.GetUnitPosition(b)
 	if not (ax and bx) then
 		return false
 	end
@@ -399,7 +397,7 @@ end
 local function Centroid(list)
 	local sx, sz, n = 0, 0, 0
 	for i = 1, #list do
-		local x, _, z = spGetUnitPosition(list[i])
+		local x, _, z = Spring.GetUnitPosition(list[i])
 		if x then
 			sx, sz, n = sx + x, sz + z, n + 1
 		end
@@ -428,10 +426,10 @@ local function Alert(text, key, sound)
 end
 
 local function IsAliveEnemy(unitID)
-	if not (unitID and spValidUnitID(unitID)) or spGetUnitIsDead(unitID) then
+	if not (unitID and Spring.ValidUnitID(unitID)) or Spring.GetUnitIsDead(unitID) then
 		return false
 	end
-	local allyTeam = spGetUnitAllyTeam(unitID)
+	local allyTeam = Spring.GetUnitAllyTeam(unitID)
 	return allyTeam ~= nil and allyTeam ~= myAllyTeamID
 end
 
@@ -441,11 +439,11 @@ end
 
 -- ammoFraction is nil both when full and when empty; noammo says which.
 local function ReadAmmo(unitID)
-	local noAmmo = spGetUnitRulesParam(unitID, "noammo") or 0
+	local noAmmo = Spring.GetUnitRulesParam(unitID, "noammo") or 0
 	if noAmmo == 1 or noAmmo == 2 then
 		return 0, noAmmo
 	end
-	return spGetUnitRulesParam(unitID, "ammoFraction") or 1, noAmmo
+	return Spring.GetUnitRulesParam(unitID, "ammoFraction") or 1, noAmmo
 end
 
 local function ClassifyState(mag)
@@ -459,10 +457,10 @@ local function ClassifyState(mag)
 	if mag.group then
 		return "attacking"
 	end
-	local cmdID = spGetUnitCurrentCommand(mag.unitID)
-	if cmdID == CMD_REARM or cmdID == CMD_FIND_PAD then
+	local cmdID = Spring.GetUnitCurrentCommand(mag.unitID)
+	if cmdID == C.REARM or cmdID == C.FIND_PAD then
 		return "returning"
-	elseif cmdID == CMD_ATTACK or cmdID == CMD_SET_TARGET or cmdID == CMD.FIGHT or cmdID == CMD.AREA_ATTACK then
+	elseif cmdID == C.ATTACK or cmdID == C.SET_TARGET or cmdID == CMD.FIGHT or cmdID == CMD.AREA_ATTACK then
 		return "attacking"
 	end
 	return "idle"
@@ -533,8 +531,8 @@ local function AddToWing(unitID, w)
 	wings[w].count = wings[w].count + 1
 	mag.wing = w
 	local retreat = Opt('retreat_state')
-	if retreat ~= 'keep' and CMD_RETREAT then
-		spGiveOrderToUnit(unitID, CMD_RETREAT, {tonumber(retreat)}, 0)
+	if retreat ~= 'keep' and C.RETREAT then
+		Spring.GiveOrderToUnit(unitID, C.RETREAT, {tonumber(retreat)}, 0)
 	end
 end
 
@@ -569,7 +567,7 @@ local function AddMagpie(unitID)
 	if magpies[unitID] then
 		return
 	end
-	local health, maxHealth = spGetUnitHealth(unitID)
+	local health, maxHealth = Spring.GetUnitHealth(unitID)
 	local ammo, noAmmo = ReadAmmo(unitID)
 	magpies[unitID] = {
 		unitID = unitID,
@@ -647,12 +645,12 @@ end
 
 -- Magpies needed for one target as it stands now. Returns need, expected losses, horizon used, source.
 local function Need(targetID, mode, horizon)
-	local defID = spGetUnitDefID(targetID)
+	local defID = Spring.GetUnitDefID(targetID)
 	local ud = defID and UnitDefs[defID]
 	if not ud then
 		return 1, 0, horizon, "unknown"
 	end
-	local health, maxHealth = spGetUnitHealth(targetID)
+	local health, maxHealth = Spring.GetUnitHealth(targetID)
 	health = health or ud.health
 	maxHealth = maxHealth or ud.health
 	local hpFrac = max(0.05, health/max(1, maxHealth))
@@ -714,7 +712,7 @@ local function AddThreat(unitID, defID)
 	if not def then
 		return false
 	end
-	local x, y, z = spGetUnitPosition(unitID)
+	local x, y, z = Spring.GetUnitPosition(unitID)
 	if not x then
 		return false
 	end
@@ -728,7 +726,7 @@ local function AddThreat(unitID, defID)
 	t.lastSeen = frame
 
 	-- Construction: watch progress to estimate when it finishes.
-	local _, _, _, _, progress = spGetUnitHealth(unitID)
+	local _, _, _, _, progress = Spring.GetUnitHealth(unitID)
 	progress = progress or 1
 	if progress < 1 then
 		if t.progress and frame > t.progressFrame and progress > t.progress then
@@ -865,7 +863,7 @@ local function CellKey(x, z)
 end
 
 local function CellAge(x, z)
-	if spIsPosInLos(x, spGetGroundHeight(x, z) or 0, z, myAllyTeamID) then
+	if Spring.IsPosInLos(x, Spring.GetGroundHeight(x, z) or 0, z, myAllyTeamID) then
 		losMemory[CellKey(x, z)] = frame
 		return 0
 	end
@@ -911,6 +909,126 @@ local function StaleCells(x1, z1, x2, z2, maxAge)
 	return out
 end
 
+-- What a straight flight crosses: time, expected damage per Magpie, the anti-air on the way and where it
+-- starts and stops (fractions of the line), stockpiled missiles in reach, fighters, and unscouted stretches.
+local function PathInsight(x1, z1, x2, z2)
+	local length = Dist2D(x1, z1, x2, z2)
+	local info = {
+		x1 = x1, z1 = z1, x2 = x2, z2 = z2, length = length, time = length/magpieStats.speed,
+		risk = RouteRisk(x1, z1, x2, z2), spans = {}, aa = {}, aaNames = {}, missiles = 0, exact = true,
+		stockpilers = 0, fighters = 0, unseen = 0,
+	}
+	local dx, dz = x2 - x1, z2 - z1
+	local a = dx*dx + dz*dz
+	for _, t in pairs(threats) do
+		local fx, fz = x1 - t.x, z1 - t.z
+		local c = fx*fx + fz*fz - t.range*t.range
+		local t1, t2
+		if a > 0 then
+			local b = 2*(fx*dx + fz*dz)
+			local disc = b*b - 4*a*c
+			if disc >= 0 then
+				local root = sqrt(disc)
+				t1, t2 = max(0, (-b - root)/(2*a)), min(1, (-b + root)/(2*a))
+			end
+		elseif c <= 0 then
+			t1, t2 = 0, 1
+		end
+		if t1 and t2 >= t1 then
+			if t.fighter then
+				info.fighters = info.fighters + 1
+			elseif not t.building then
+				local def = aaDefs[t.defID]
+				local danger = max(0, min(1, 1 - t.ttk/15))
+				local stock, _, exact = StockEstimate(t)
+				if stock then
+					info.missiles = info.missiles + stock
+					info.stockpilers = info.stockpilers + 1
+					info.exact = info.exact and exact
+					danger = (stock > 0) and 1 or 0.2
+				end
+				info.spans[#info.spans + 1] = {t1, t2, danger}
+				if not info.aa[def.name] then
+					info.aaNames[#info.aaNames + 1] = def.name
+				end
+				info.aa[def.name] = (info.aa[def.name] or 0) + 1
+			end
+		end
+	end
+	table.sort(info.aaNames, function(p, q)
+		if info.aa[p] ~= info.aa[q] then
+			return info.aa[p] > info.aa[q]
+		end
+		return p < q
+	end)
+	-- Share of the line nobody has seen within the stale time.
+	local steps = max(1, ceil(length/(LOS_CELL*0.5)))
+	local unseen = 0
+	for i = 0, steps do
+		local f = i/steps
+		if CellAge(x1 + dx*f, z1 + dz*f) > Opt('stale_seconds') then
+			unseen = unseen + 1
+		end
+	end
+	info.unseen = unseen/(steps + 1)
+	return info
+end
+
+-- The lines of the flight path card.
+local function PathLines(info, selected)
+	local lines = {}
+	local ammo, n = 0, 0
+	for i = 1, #selected do
+		local mag = magpies[selected[i]]
+		if mag then
+			ammo, n = ammo + mag.ammo, n + 1
+		end
+	end
+	lines[1] = {string.format("%d Magpie%s, ammo %d%%, flight %.0f s", n, n == 1 and "" or "s", n > 0 and floor(ammo/n*100 + 0.5) or 0, info.time), "text"}
+	local share = info.risk/magpieStats.maxHealth
+	if info.risk < 1 then
+		lines[#lines + 1] = {"No known anti-air on this line.", "ready"}
+	elseif share >= 1 then
+		lines[#lines + 1] = {string.format("Lethal: about %d damage per Magpie (%d HP each)", floor(info.risk), magpieStats.maxHealth), "returning"}
+	else
+		lines[#lines + 1] = {string.format("About %d damage per Magpie (%d%% of its health)", floor(info.risk), floor(share*100 + 0.5)), share > 0.5 and "returning" or "attacking"}
+	end
+	if #info.aaNames > 0 then
+		local parts = {}
+		for i = 1, min(4, #info.aaNames) do
+			local name = info.aaNames[i]
+			parts[#parts + 1] = info.aa[name] .. " " .. name
+		end
+		if #info.aaNames > 4 then
+			parts[#parts + 1] = "more"
+		end
+		lines[#lines + 1] = {"Crosses " .. table.concat(parts, ", "), "muted"}
+	end
+	if info.stockpilers > 0 then
+		lines[#lines + 1] = {string.format("%d stockpiler%s in reach: %s%d missile%s", info.stockpilers, info.stockpilers == 1 and "" or "s",
+			info.exact and "" or "at least ", info.missiles, info.missiles == 1 and "" or "s"), info.missiles > 0 and "returning" or "muted"}
+	end
+	if info.fighters > 0 then
+		lines[#lines + 1] = {string.format("%d enemy fighter%s near the line", info.fighters, info.fighters == 1 and "" or "s"), "returning"}
+	end
+	if info.unseen > 0.05 then
+		lines[#lines + 1] = {string.format("%d%% of the line unseen for %d s or more", floor(info.unseen*100 + 0.5), Opt('stale_seconds')), "muted"}
+	end
+	-- Home again afterwards
+	local best
+	for padID in pairs(pads) do
+		local px, _, pz = Spring.GetUnitPosition(padID)
+		if px then
+			local d = Dist2D(info.x2, info.z2, px, pz)
+			best = (not best or d < best) and d or best
+		end
+	end
+	if best then
+		lines[#lines + 1] = {string.format("Back to the nearest pad: %.0f s", best/magpieStats.speed), "muted"}
+	end
+	return lines
+end
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Pads
@@ -935,12 +1053,12 @@ local function PadLoad(padID)
 end
 
 local function PadUsable(padID)
-	return spGetUnitRulesParam(padID, "padExcluded" .. myTeamID) ~= 1
+	return Spring.GetUnitRulesParam(padID, "padExcluded" .. myTeamID) ~= 1
 end
 
 -- Pick the pad with the shortest flight plus wait.
 local function ChoosePad(unitID)
-	local x, _, z = spGetUnitPosition(unitID)
+	local x, _, z = Spring.GetUnitPosition(unitID)
 	if not x then
 		return nil
 	end
@@ -948,7 +1066,7 @@ local function ChoosePad(unitID)
 	local best, bestScore
 	for padID, pad in pairs(pads) do
 		if PadUsable(padID) then
-			local px, _, pz = spGetUnitPosition(padID)
+			local px, _, pz = Spring.GetUnitPosition(padID)
 			if px then
 				local flight = Dist2D(x, z, px, pz)/magpieStats.speed
 				local service = magpieStats.rearmSeconds + RepairSeconds(mag, pad)
@@ -963,40 +1081,97 @@ local function ChoosePad(unitID)
 	return best, bestScore
 end
 
-local function ReadyETA(mag)
-	if mag.state == "idle" and MagpieReady(mag) then
-		return 0
+-- When each grounded or homebound Magpie is ready again. Each pad serves its Magpies first come, first
+-- served, one per slot: flight to the pad, wait for a free slot, rearm, then repair to full health.
+local padQueue = {frame = -1000, eta = {}, parts = {}}
+
+local function PadQueue()
+	if frame - padQueue.frame < 15 and padQueue.frame >= 0 then
+		return padQueue
 	end
-	local pad = mag.pad and pads[mag.pad]
-	local eta = 0
-	if mag.noAmmo == 1 then
-		local padID = mag.pad
-		if padID then
-			local d = UnitDist2D(mag.unitID, padID)
-			eta = eta + (d or 0)/magpieStats.speed + floor(PadLoad(padID)/pads[padID].cap)*magpieStats.rearmSeconds
+	local byPad = {}
+	local eta, parts = {}, {}
+	for unitID, mag in pairs(magpies) do
+		if mag.noAmmo ~= 0 or mag.state == "returning" then
+			local padID = mag.pad
+			if not (padID and pads[padID]) then
+				padID = ChoosePad(unitID) -- where it will most likely go
+			end
+			if padID then
+				local pad = pads[padID]
+				local onPad = (mag.noAmmo == 2 or mag.noAmmo == 3)
+				local flight = onPad and 0 or (UnitDist2D(unitID, padID) or 0)/magpieStats.speed
+				local rearm = magpieStats.rearmSeconds
+				if mag.noAmmo == 2 then
+					rearm = max(0, rearm - (frame - (mag.rearmStart or frame))/30)
+				elseif mag.noAmmo == 3 then
+					rearm = 0
+				end
+				local repair = RepairSeconds(mag, pad)
+				byPad[padID] = byPad[padID] or {}
+				local list = byPad[padID]
+				list[#list + 1] = {unitID = unitID, onPad = onPad, flight = flight, rearm = rearm, repair = repair}
+			end
 		end
-		eta = eta + magpieStats.rearmSeconds
-	elseif mag.noAmmo == 2 then
-		eta = eta + magpieStats.rearmSeconds*0.5
 	end
-	if mag.noAmmo ~= 0 then
-		local target = mag.maxHealth*Opt('ready_health')/100
-		if mag.health < target then
-			eta = eta + (target - mag.health)/PadHealRate(pad or {bp = 2.5})
+	for padID, list in pairs(byPad) do
+		table.sort(list, function(a, b)
+			if a.onPad ~= b.onPad then
+				return a.onPad
+			end
+			if a.flight ~= b.flight then
+				return a.flight < b.flight
+			end
+			return a.unitID < b.unitID
+		end)
+		local free = {}
+		for i = 1, max(1, pads[padID].cap) do
+			free[i] = 0
+		end
+		for i = 1, #list do
+			local e = list[i]
+			local slot = 1
+			for j = 2, #free do
+				if free[j] < free[slot] then
+					slot = j
+				end
+			end
+			local start = max(e.flight, free[slot])
+			local finish = start + e.rearm + e.repair
+			free[slot] = finish
+			eta[e.unitID] = frame + finish*30 -- frame it is ready, so the estimate keeps counting down between updates
+			parts[e.unitID] = {flight = e.flight, wait = start - e.flight, rearm = e.rearm, repair = e.repair, pad = padID}
 		end
 	end
-	return eta
+	padQueue.frame, padQueue.eta, padQueue.parts = frame, eta, parts
+	return padQueue
 end
 
+local function ReadyETA(mag)
+	if mag.noAmmo == 0 and mag.state ~= "returning" then
+		return 0
+	end
+	local readyFrame = PadQueue().eta[mag.unitID]
+	if readyFrame then
+		return max(0, (readyFrame - frame)/30)
+	end
+	-- No pad at all: rearm and repair at the default rate once it gets one.
+	return magpieStats.rearmSeconds + RepairSeconds(mag)
+end
+
+-- Seconds until the whole wing is ready, and the breakdown for the Magpie that takes longest.
 local function WingETA(w)
-	local worst = 0
+	local worst, worstParts = 0, nil
 	for unitID in pairs(wings[w].units) do
 		local mag = magpies[unitID]
 		if mag then
-			worst = max(worst, ReadyETA(mag))
+			local eta = ReadyETA(mag)
+			if eta > worst then
+				worst, worstParts = eta, padQueue.parts[unitID]
+			end
 		end
 	end
-	return worst
+	return worst, worstParts
 end
 
 -- Pad slots needed so a fleet cycling sorties of `cycle` seconds never waits.
@@ -1065,18 +1240,20 @@ local function NewRun(w, targets, mode, launched)
 		damage = 0, kills = 0, killValue = 0, lost = 0, open = true,
 	}
 	for i = 1, #(targets or {}) do
-		local defID = spGetUnitDefID(targets[i])
+		local defID = Spring.GetUnitDefID(targets[i])
 		run.targets[#run.targets + 1] = defID and UnitDefs[defID].name or "unknown"
 	end
 	runs[#runs + 1] = run
 	return run
 end
 
+-- Share of the damage aimed bursts could have done that landed. Bursts fired out of range are counted as wasted instead.
 local function RunHitFactor(run)
-	if run.bursts == 0 then
+	local aimed = run.bursts - run.wasted
+	if aimed <= 0 then
 		return nil
 	end
-	return run.damage/(run.bursts*magpieStats.damagePerBurst)
+	return run.damage/(aimed*magpieStats.damagePerBurst)
 end
 
 local function ExpectedHitFactor(run)
@@ -1093,10 +1270,10 @@ local function ExpectedHitFactor(run)
 end
 
 local function MagpieMode(unitID)
-	if not CMD_LOOP_ATTACK then
+	if not C.LOOP_ATTACK then
 		return "?"
 	end
-	local index = Spring.FindUnitCmdDesc(unitID, CMD_LOOP_ATTACK)
+	local index = Spring.FindUnitCmdDesc(unitID, C.LOOP_ATTACK)
 	local descs = index and Spring.GetUnitCmdDescs(unitID, index, index)
 	local desc = descs and descs[1]
 	if desc and desc.params then
@@ -1106,11 +1283,45 @@ local function MagpieMode(unitID)
 end
 
 local function CurrentTarget(unitID)
-	local cmdID, _, _, p1, p2 = spGetUnitCurrentCommand(unitID)
-	if cmdID == CMD_ATTACK and p1 and not p2 then
+	local cmdID, _, _, p1, p2 = Spring.GetUnitCurrentCommand(unitID)
+	if cmdID == C.ATTACK and p1 and not p2 then
 		return p1
 	end
 	return nil
+end
+
+-- Widgets only get UnitDamaged and UnitDestroyed for their own allyteam's units, so damage dealt is read off
+-- the health of what Magpies are shooting at. Each burst opens credit for its damage on the target for a
+-- moment; health the target loses in that time is paid out of the credit.
+
+-- What a Magpie is shooting at: its weapon's target, else its group's or its order's.
+function AimOf(mag)
+	local kind, _, targetID = Spring.GetUnitWeaponTarget(mag.unitID, 1)
+	if kind == 1 and targetID then
+		return targetID
+	end
+	return (mag.group and groups[mag.group] and groups[mag.group].target) or CurrentTarget(mag.unitID)
+end
+
+function Watch(unitID)
+	if not unitID then
+		return nil
+	end
+	local s = struck[unitID]
+	if not s then
+		if not IsAliveEnemy(unitID) then
+			return nil
+		end
+		local health = Spring.GetUnitHealth(unitID)
+		if not health then
+			return nil
+		end
+		local x, y, z = Spring.GetUnitPosition(unitID)
+		s = {health = health, credit = 0, expire = 0, defID = Spring.GetUnitDefID(unitID), x = x, y = y, z = z}
+		struck[unitID] = s
+	end
+	s.watched = frame
+	return s
 end
 
 -- Called when a Magpie's ammo drops by one burst.
@@ -1123,7 +1334,7 @@ local function RecordBurst(mag)
 		local w = mag.wing or 0
 		run = runByWing[w]
 		if not (run and run.open and frame - run.last < 30*20) then
-			local target = CurrentTarget(mag.unitID)
+			local target = AimOf(mag)
 			run = NewRun(w, target and {target} or {}, MagpieMode(mag.unitID), false)
 			runByWing[w] = run
 		end
@@ -1132,14 +1343,66 @@ local function RecordBurst(mag)
 	end
 	run.bursts = run.bursts + 1
 	run.last = frame
-	local target = (mag.group and groups[mag.group] and groups[mag.group].target) or CurrentTarget(mag.unitID)
+	local target = AimOf(mag)
 	if target then
 		local d = UnitDist2D(mag.unitID, target)
 		if d and d > magpieStats.range + 100 then
 			run.wasted = run.wasted + 1
+		else
+			-- Damage this burst can account for, used up as the target's health drops.
+			local s = Watch(target)
+			if s then
+				s.credit = s.credit + magpieStats.damagePerBurst
+				s.expire = frame + 45
+				s.run = run
+			end
 		end
 	else
 		run.wasted = run.wasted + 1
+	end
+end
+
+-- Health drops on watched targets, paid out of burst credit. A target that dies with recent Magpie damage is a kill.
+local function KillCredit(unitID, s)
+	struck[unitID] = nil
+	if s.hitRun and s.lastHit and frame - s.lastHit < 30*5 then
+		local cost = UnitDefs[s.defID] and UnitDefs[s.defID].metalCost or 0
+		s.hitRun.kills = s.hitRun.kills + 1
+		s.hitRun.killValue = s.hitRun.killValue + cost
+		totals.metalKilled = totals.metalKilled + cost
+		return true
+	end
+	return false
+end
+
+local function UpdateStruck()
+	for unitID, s in pairs(struck) do
+		local health = Spring.GetUnitHealth(unitID)
+		if health then
+			local drop = s.health - health
+			if drop > 0 and s.credit > 0 and s.run then
+				local got = min(drop, s.credit)
+				s.credit = s.credit - got
+				s.run.damage = s.run.damage + got
+				s.hitRun, s.lastHit = s.run, frame
+			end
+			s.health = health
+			s.x, s.y, s.z = Spring.GetUnitPosition(unitID)
+			if frame > s.expire then
+				s.credit = 0
+			end
+			if Spring.GetUnitIsDead(unitID) then
+				KillCredit(unitID, s)
+			elseif s.credit == 0 and frame - s.watched > 30*5 then
+				struck[unitID] = nil
+			end
+		else
+			-- Gone. If its last spot is in sight it did not just walk out of view: it died.
+			if s.x and Spring.IsPosInLos(s.x, s.y or 0, s.z, myAllyTeamID) then
+				KillCredit(unitID, s)
+			end
+			struck[unitID] = nil
+		end
 	end
 end
 
@@ -1173,18 +1436,20 @@ local function CSVLine(run)
 	}, ",")
 end
 
-local CSV_HEADER = "run,wing,start_s,end_s,targets,mode,launched,magpies,bursts,wasted_bursts,landing_waste,damage,hit_factor,sim_hit_factor,kills,kill_metal,magpies_lost"
-local HISTORY_HEADER = "date,runs,bursts,damage,hit_factor,kills,kill_metal,magpies_lost,metal_lost"
-local EXPORT_DIR = "LuaUI/Config/Revolver/"
+local FILES = {}
+FILES.CSV_HEADER = "run,wing,start_s,end_s,targets,mode,launched,magpies,bursts,wasted_bursts,landing_waste,damage,hit_factor,sim_hit_factor,kills,kill_metal,magpies_lost"
+FILES.HISTORY_HEADER = "date,runs,bursts,damage,hit_factor,kills,kill_metal,magpies_lost,metal_lost"
+FILES.EXPORT_DIR = "LuaUI/Config/Revolver/"
 
 local function GameTotals()
-	local bursts, damage, kills, lost = 0, 0, 0, 0
+	local bursts, aimed, damage, kills, lost = 0, 0, 0, 0, 0
 	for i = 1, #runs do
 		local run = runs[i]
 		bursts, damage, kills, lost = bursts + run.bursts, damage + run.damage, kills + run.kills, lost + run.lost
+		aimed = aimed + run.bursts - run.wasted
 	end
-	local hit = (bursts > 0) and damage/(bursts*magpieStats.damagePerBurst) or nil
-	return {runs = #runs, bursts = bursts, damage = damage, kills = kills, lost = lost, hit = hit}
+	local hit = (aimed > 0) and damage/(aimed*magpieStats.damagePerBurst) or nil
+	return {runs = #runs, bursts = bursts, aimed = aimed, damage = damage, kills = kills, lost = lost, hit = hit}
 end
 
 local function LoadHistory()
@@ -1192,7 +1457,7 @@ local function LoadHistory()
 	if not Opt('career_history') then
 		return
 	end
-	local file = io.open(EXPORT_DIR .. "history.csv", "r")
+	local file = io.open(FILES.EXPORT_DIR .. "history.csv", "r")
 	if not file then
 		return
 	end
@@ -1202,7 +1467,9 @@ local function LoadHistory()
 			cells[#cells + 1] = cell
 		end
 		local hit = tonumber(cells[5])
-		if hit then
+		-- Games recorded before damage was measured from health show bursts with no damage: skip them.
+		local brokenRow = (tonumber(cells[3]) or 0) > 0 and tonumber(cells[4]) == 0
+		if hit and not brokenRow then
 			history[#history + 1] = {date = cells[1], hit = hit, kills = tonumber(cells[6]) or 0, lost = tonumber(cells[8]) or 0}
 		end
 	end
@@ -1214,24 +1481,24 @@ local function Export()
 		return false
 	end
 	exported = true
-	Spring.CreateDir(EXPORT_DIR)
+	Spring.CreateDir(FILES.EXPORT_DIR)
 	local stamp = os.date("%Y%m%d_%H%M%S")
-	local file = io.open(EXPORT_DIR .. "sorties_" .. stamp .. ".csv", "w")
+	local file = io.open(FILES.EXPORT_DIR .. "sorties_" .. stamp .. ".csv", "w")
 	if not file then
 		return false
 	end
-	file:write(CSV_HEADER .. "\n")
+	file:write(FILES.CSV_HEADER .. "\n")
 	for i = 1, #runs do
 		file:write(CSVLine(runs[i]) .. "\n")
 	end
 	file:close()
 
 	local t = GameTotals()
-	local newHistory = not io.open(EXPORT_DIR .. "history.csv", "r")
-	local hist = Opt('career_history') and io.open(EXPORT_DIR .. "history.csv", "a")
+	local newHistory = not io.open(FILES.EXPORT_DIR .. "history.csv", "r")
+	local hist = Opt('career_history') and io.open(FILES.EXPORT_DIR .. "history.csv", "a")
 	if hist then
 		if newHistory then
-			hist:write(HISTORY_HEADER .. "\n")
+			hist:write(FILES.HISTORY_HEADER .. "\n")
 		end
 		hist:write(table.concat({
 			os.date("%Y-%m-%d %H:%M"), t.runs, t.bursts, string.format("%.1f", t.damage),
@@ -1239,7 +1506,7 @@ local function Export()
 		}, ",") .. "\n")
 		hist:close()
 	end
-	return EXPORT_DIR .. "sorties_" .. stamp .. ".csv"
+	return FILES.EXPORT_DIR .. "sorties_" .. stamp .. ".csv"
 end
 
 -- Measured hit factor per target type and mode, against the Magpie Manual figure.
@@ -1247,11 +1514,11 @@ local function TargetTable()
 	local agg = {}
 	for i = 1, #runs do
 		local run = runs[i]
-		if #run.targets == 1 and run.bursts > 0 and (run.mode == "strafe" or run.mode == "loopback") then
+		if #run.targets == 1 and run.bursts > run.wasted and (run.mode == "strafe" or run.mode == "loopback") then
 			local key = run.targets[1] .. "/" .. run.mode
 			agg[key] = agg[key] or {target = run.targets[1], mode = run.mode, bursts = 0, damage = 0, runs = 0}
 			local a = agg[key]
-			a.bursts, a.damage, a.runs = a.bursts + run.bursts, a.damage + run.damage, a.runs + 1
+			a.bursts, a.damage, a.runs = a.bursts + run.bursts - run.wasted, a.damage + run.damage, a.runs + 1
 		end
 	end
 	local list = {}
@@ -1276,18 +1543,18 @@ local CalibrationTable = TargetTable
 
 local function SetFireState(list, state)
 	if #list > 0 then
-		spGiveOrderToUnitArray(list, CMD_FIRE_STATE, {state}, 0)
+		Spring.GiveOrderToUnitArray(list, C.FIRE_STATE, {state}, 0)
 	end
 end
 
 local function SetMode(list, mode)
-	if CMD_LOOP_ATTACK and #list > 0 then
-		spGiveOrderToUnitArray(list, CMD_LOOP_ATTACK, {(mode == "loopback") and 1 or 0}, 0)
+	if C.LOOP_ATTACK and #list > 0 then
+		Spring.GiveOrderToUnitArray(list, C.LOOP_ATTACK, {(mode == "loopback") and 1 or 0}, 0)
 	end
 end
 
 local function StagingPoint(group)
-	local tx, _, tz = spGetUnitPosition(group.target)
+	local tx, _, tz = Spring.GetUnitPosition(group.target)
 	if not tx then
 		return false
 	end
@@ -1310,7 +1577,7 @@ local function StagingPoint(group)
 	end
 	local dist = Opt('staging_distance')
 	local sx, sz = tx + dx/d*dist, tz + dz/d*dist
-	local sy = spGetGroundHeight(sx, sz) or 0
+	local sy = Spring.GetGroundHeight(sx, sz) or 0
 	return sx, sy, sz
 end
 
@@ -1319,7 +1586,7 @@ local function OrderAttack(group)
 	if #list == 0 then
 		return
 	end
-	spGiveOrderToUnitArray(list, CMD_ATTACK, {group.target}, 0)
+	Spring.GiveOrderToUnitArray(list, C.ATTACK, {group.target}, 0)
 	group.phase = "attack"
 end
 
@@ -1330,13 +1597,13 @@ local function ReleaseGroup(group, home)
 		if mag then
 			mag.group = nil
 			if mag.savedFire ~= nil then
-				spGiveOrderToUnit(list[i], CMD_FIRE_STATE, {mag.savedFire}, 0)
+				Spring.GiveOrderToUnit(list[i], C.FIRE_STATE, {mag.savedFire}, 0)
 				mag.savedFire = nil
 			end
 		end
 	end
 	if home and #list > 0 then
-		spGiveOrderToUnitArray(list, CMD_FIND_PAD, {}, 0)
+		Spring.GiveOrderToUnitArray(list, C.FIND_PAD, {}, 0)
 	end
 	groups[group.id] = nil
 end
@@ -1355,7 +1622,7 @@ end
 local function Retarget(group, target)
 	group.target = target
 	group.slowChained = false
-	local defID = spGetUnitDefID(target)
+	local defID = Spring.GetUnitDefID(target)
 	if Opt('auto_style') and defID then
 		group.mode = AdviseMode(UnitDefs[defID].name, tonumber(Opt('horizon')))
 		SetMode(UnitList(group.units), group.mode)
@@ -1378,8 +1645,8 @@ local function LaunchGroup(list, target, queue, mode, approach, rotate, direct)
 		w = w or mag.wing
 		if Opt('hold_fire') then
 			if mag.savedFire == nil then
-				local firestate = spGetUnitStates(list[i], false)
-				mag.savedFire = firestate or FIRESTATE_FREE
+				local firestate = Spring.GetUnitStates(list[i], false)
+				mag.savedFire = firestate or C.FREE
 			end
 		end
 	end
@@ -1395,17 +1662,17 @@ local function LaunchGroup(list, target, queue, mode, approach, rotate, direct)
 
 	SetMode(list, mode)
 	if Opt('hold_fire') then
-		SetFireState(list, FIRESTATE_HOLD)
+		SetFireState(list, C.HOLD)
 	end
 	if not direct and (Opt('time_on_target') or approach) then
 		local sx, sy, sz = StagingPoint(group)
 		if sx then
-			spGiveOrderToUnitArray(list, CMD_MOVE, {sx, sy, sz}, 0)
+			Spring.GiveOrderToUnitArray(list, C.MOVE, {sx, sy, sz}, 0)
 			group.phase = "staging"
 			group.staging = {sx, sy, sz}
 			if not Opt('time_on_target') then
 				-- Approach only: queue the attack straight after the waypoint.
-				spGiveOrderToUnitArray(list, CMD_ATTACK, {target}, CMD_OPT_SHIFT)
+				Spring.GiveOrderToUnitArray(list, C.ATTACK, {target}, C.OPT_SHIFT)
 				group.phase = "attack"
 			end
 			return group
@@ -1449,7 +1716,7 @@ local function Allocate(targets, pool, horizon)
 	local shortfall = 0
 	for i = 1, #targets do
 		local target = targets[i]
-		local defID = spGetUnitDefID(target)
+		local defID = Spring.GetUnitDefID(target)
 		local name = defID and UnitDefs[defID].name or "unknown"
 		local mode = Opt('auto_style') and AdviseMode(name, horizon) or "strafe"
 		local need, lost, usedHorizon, source = Need(target, mode, horizon)
@@ -1478,7 +1745,7 @@ local function WholeWings(targets, pool, horizon)
 	end
 	local plan, used = {}, 0
 	for i = 1, #targets do
-		local defID = spGetUnitDefID(targets[i])
+		local defID = Spring.GetUnitDefID(targets[i])
 		local name = defID and UnitDefs[defID].name or "unknown"
 		local mode = Opt('auto_style') and AdviseMode(name, horizon) or "strafe"
 		local list = order[i] and byWing[order[i]] or {}
@@ -1493,17 +1760,17 @@ end
 -- Actions
 
 local function HoveredEnemy()
-	local mx, my = spGetMouseState()
-	local kind, id = spTraceScreenRay(mx, my)
-	if kind == "unit" and IsAliveEnemy(id) and spGetUnitDefID(id) then
+	local mx, my = Spring.GetMouseState()
+	local kind, id = Spring.TraceScreenRay(mx, my)
+	if kind == "unit" and IsAliveEnemy(id) and Spring.GetUnitDefID(id) then
 		return id
 	end
 	return nil
 end
 
 local function HoveredGround()
-	local mx, my = spGetMouseState()
-	local kind, pos = spTraceScreenRay(mx, my, true)
+	local mx, my = Spring.GetMouseState()
+	local kind, pos = Spring.TraceScreenRay(mx, my, true)
 	if kind == "ground" then
 		return pos
 	end
@@ -1599,19 +1866,26 @@ function Recall()
 		mag.group = nil
 		mag.state = "returning"
 		if mag.savedFire ~= nil then
-			spGiveOrderToUnit(list[i], CMD_FIRE_STATE, {mag.savedFire}, 0)
+			Spring.GiveOrderToUnit(list[i], C.FIRE_STATE, {mag.savedFire}, 0)
 			mag.savedFire = nil
 		end
 	end
 	if #list > 0 then
-		spGiveOrderToUnitArray(list, CMD_FIND_PAD, {}, 0)
+		Spring.GiveOrderToUnitArray(list, C.FIND_PAD, {}, 0)
 	end
 	return list
 end
 
-function SelectWing(w)
+-- Shift or Ctrl adds the wing to the selection. So does a wing key pressed together with another one.
+function SelectWing(w, add)
+	if add == nil then
+		local _, ctrl, _, shift = Spring.GetModKeyState()
+		local now = Spring.GetTimer()
+		add = shift or ctrl or (lastClick.keyTimer ~= nil and Spring.DiffTimers(now, lastClick.keyTimer) < 0.4)
+		lastClick.keyTimer = now
+	end
 	local list = UnitList(wings[w].units)
-	Spring.SelectUnitArray(list)
+	Spring.SelectUnitArray(list, add and true or false)
 	return list
 end
 
@@ -1665,7 +1939,7 @@ function ToggleCalibration()
 		Alert("Hover the target to calibrate against.")
 		return false
 	end
-	calibration = {target = target, defID = spGetUnitDefID(target)}
+	calibration = {target = target, defID = Spring.GetUnitDefID(target)}
 	Alert("Calibration on. Chambered wings will keep attacking this target.")
 	return true
 end
@@ -1675,7 +1949,7 @@ end
 -- Update
 
 local function UpdateMagpie(unitID, mag)
-	local health, maxHealth = spGetUnitHealth(unitID)
+	local health, maxHealth = Spring.GetUnitHealth(unitID)
 	if not health then
 		return
 	end
@@ -1685,12 +1959,16 @@ local function UpdateMagpie(unitID, mag)
 	local oldAmmo, oldNoAmmo = mag.ammo, mag.noAmmo
 	local ammo, noAmmo = ReadAmmo(unitID)
 	mag.ammo, mag.noAmmo = ammo, noAmmo
+	if noAmmo ~= oldNoAmmo then
+		padQueue.frame = -1000 -- someone joined or left a pad queue
+	end
 
 	-- Repair on pads costs energy in proportion to health restored.
 	if noAmmo == 3 and health > oldHealth then
 		totals.repairEnergy = totals.repairEnergy + (health - oldHealth)*repairCostFactor*magpieStats.cost/mag.maxHealth
 	end
 	if oldNoAmmo ~= 2 and noAmmo == 2 then
+		mag.rearmStart = frame
 		totals.rearms = totals.rearms + 1
 		totals.rearmEnergy = totals.rearmEnergy + 10*magpieStats.rearmSeconds
 	end
@@ -1718,22 +1996,22 @@ local function UpdateMagpie(unitID, mag)
 		end
 		mag.group = nil
 		if mag.savedFire ~= nil then
-			spGiveOrderToUnit(unitID, CMD_FIRE_STATE, {mag.savedFire}, 0)
+			Spring.GiveOrderToUnit(unitID, C.FIRE_STATE, {mag.savedFire}, 0)
 			mag.savedFire = nil
 		end
 		if Opt('pad_balance') and next(pads) then
 			local padID = ChoosePad(unitID)
 			if padID then
 				mag.pad = padID
-				spGiveOrderToUnit(unitID, CMD_REARM, {padID}, 0)
+				Spring.GiveOrderToUnit(unitID, C.REARM, {padID}, 0)
 			end
 		end
 	elseif noAmmo == 0 and oldNoAmmo ~= 0 then
 		mag.pad = nil
 	end
 	if noAmmo ~= 0 and not mag.pad then
-		local cmdID, _, _, p1 = spGetUnitCurrentCommand(unitID)
-		if cmdID == CMD_REARM and p1 and pads[p1] then
+		local cmdID, _, _, p1 = Spring.GetUnitCurrentCommand(unitID)
+		if cmdID == C.REARM and p1 and pads[p1] then
 			mag.pad = p1
 		end
 	end
@@ -1770,7 +2048,7 @@ local function UpdateGroups()
 				local sx, _, sz = group.staging[1], group.staging[2], group.staging[3]
 				local near = 0
 				for i = 1, #list do
-					local x, _, z = spGetUnitPosition(list[i])
+					local x, _, z = Spring.GetUnitPosition(list[i])
 					if x and Dist2D(x, z, sx, sz) < 350 then
 						near = near + 1
 					end
@@ -1784,16 +2062,16 @@ local function UpdateGroups()
 					for i = 1, #list do
 						local mag = magpies[list[i]]
 						local d = UnitDist2D(list[i], group.target)
-						local want = (d and d <= magpieStats.range + 60) and FIRESTATE_FREE or FIRESTATE_HOLD
+						local want = (d and d <= magpieStats.range + 60) and C.FREE or C.HOLD
 						if mag.fireNow ~= want then
 							mag.fireNow = want
-							spGiveOrderToUnit(list[i], CMD_FIRE_STATE, {want}, 0)
+							Spring.GiveOrderToUnit(list[i], C.FIRE_STATE, {want}, 0)
 						end
 					end
 				end
 				-- Slow chain
 				if Opt('slow_chain') and not group.slowChained and #list > 1 then
-					local slow = spGetUnitRulesParam(group.target, "slowState") or 0
+					local slow = Spring.GetUnitRulesParam(group.target, "slowState") or 0
 					if slow >= defs.maxSlow then
 						local nextTarget = NextTarget(group)
 						if nextTarget then
@@ -1847,7 +2125,7 @@ end
 
 local function UpdateThreats()
 	for unitID, t in pairs(threats) do
-		local defID = spValidUnitID(unitID) and spGetUnitDefID(unitID)
+		local defID = Spring.ValidUnitID(unitID) and Spring.GetUnitDefID(unitID)
 		if defID then
 			AddThreat(unitID, defID)
 		else
@@ -1863,7 +2141,7 @@ local function UpdateThreats()
 				if frame - t.lastSeen > 30*20 then
 					threats[unitID] = nil
 				end
-			elseif spIsPosInLos(t.x, t.y, t.z, myAllyTeamID) and not spValidUnitID(unitID) then
+			elseif Spring.IsPosInLos(t.x, t.y, t.z, myAllyTeamID) and not Spring.ValidUnitID(unitID) then
 				threats[unitID] = nil -- We can see the spot and it is gone.
 			end
 		end
@@ -1906,7 +2184,7 @@ local routeCache = {}
 local function UpdateRoutes()
 	local list = {}
 	local function Add(x1, z1, target, label)
-		local tx, ty, tz = spGetUnitPosition(target)
+		local tx, ty, tz = Spring.GetUnitPosition(target)
 		if not (tx and x1) then
 			return
 		end
@@ -1958,7 +2236,7 @@ end
 
 function widget:UnitGiven(unitID, unitDefID, newTeam)
 	if newTeam == myTeamID then
-		local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
+		local _, _, _, _, buildProgress = Spring.GetUnitHealth(unitID)
 		if (buildProgress or 1) >= 1 then
 			widget:UnitFinished(unitID, unitDefID, newTeam)
 		end
@@ -1987,32 +2265,46 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 	end
 	threats[unitID] = nil
 	reloadSeen[unitID] = nil
-	local hit = lastHit[unitID]
-	if hit and frame - hit.frame < 30*5 then
-		local cost = UnitDefs[unitDefID] and UnitDefs[unitDefID].metalCost or 0
-		hit.run.kills = hit.run.kills + 1
-		hit.run.killValue = hit.run.killValue + cost
-		totals.metalKilled = totals.metalKilled + cost
+	-- Only reaches widgets for enemy units with full view (replays); players see enemy deaths through UpdateStruck.
+	local s = struck[unitID]
+	if s then
+		local health = Spring.GetUnitHealth(unitID)
+		if health then
+			UpdateStruck()
+		end
+		if struck[unitID] then
+			KillCredit(unitID, s)
+		end
 	end
-	lastHit[unitID] = nil
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
 	if paralyzer or not damage then
 		return
 	end
-	local attacker = attackerID and magpies[attackerID]
-	if attacker and not Spring.AreTeamsAllied(unitTeam, myTeamID) then
-		local run = attacker.run
-		if run and Opt('ledger_tracking') then
-			run.damage = run.damage + damage
-			lastHit[unitID] = {run = run, frame = frame}
-		end
+	-- Players only hear about their own team's units here; damage Magpies deal is tracked in UpdateStruck.
+	if not Spring.AreTeamsAllied(unitTeam, myTeamID) then
 		return
 	end
 	local shooter = attackerID and threats[attackerID]
 	if shooter and aaDefs[shooter.defID].stockTime then
 		ConsumeMissile(shooter)
+	elseif not attackerID and magpies[unitID] then
+		-- Hit from out of sight: a missile-sized hit came from the nearest stockpiler that reaches us.
+		local x, _, z = Spring.GetUnitPosition(unitID)
+		local best, bestD
+		for _, t in pairs(threats) do
+			local def = aaDefs[t.defID]
+			if x and def.stockTime and damage >= def.stockShot*0.6 then
+				local d = Dist2D(x, z, t.x, t.z)
+				if d <= t.range + 100 and (not bestD or d < bestD) then
+					best, bestD = t, d
+				end
+			end
+		end
+		if best then
+			ConsumeMissile(best)
+		end
 	end
 	-- Something shot one of our Magpies: note long reloads.
 	if magpies[unitID] and attackerID and attackerDefID and aaDefs[attackerDefID] and aaDefs[attackerDefID].reload then
@@ -2024,7 +2316,7 @@ function widget:UnitEnteredLos(unitID, unitTeam)
 	if Spring.AreTeamsAllied(unitTeam, myTeamID) then
 		return
 	end
-	local defID = spGetUnitDefID(unitID)
+	local defID = Spring.GetUnitDefID(unitID)
 	if not defID then
 		return
 	end
@@ -2032,7 +2324,7 @@ function widget:UnitEnteredLos(unitID, unitTeam)
 		-- New anti-air on the route of a wing on its way in?
 		local t = threats[unitID]
 		for gid, group in pairs(groups) do
-			local tx, _, tz = spGetUnitPosition(group.target)
+			local tx, _, tz = Spring.GetUnitPosition(group.target)
 			local cx, cz = Centroid(UnitList(group.units))
 			if Opt('route_alert') and tx and cx and not t.fighter and DistToSegment(t.x, t.z, cx, cz, tx, tz) <= t.range then
 				Alert("New " .. aaDefs[defID].name .. " on wing " .. (WING_LETTER[group.wing] or "?") .. "'s route.", "route" .. gid .. "_" .. unitID, "sounds/reply/alarm.wav")
@@ -2052,8 +2344,15 @@ end
 function widget:GameFrame(n)
 	frame = n
 	if n % 4 == 0 then
+		local track = Opt('ledger_tracking')
 		for unitID, mag in pairs(magpies) do
+			if track and mag.noAmmo == 0 then
+				Watch(AimOf(mag)) -- health baseline before the burst lands
+			end
 			UpdateMagpie(unitID, mag)
+		end
+		if track then
+			UpdateStruck()
 		end
 	end
 	if n % 6 == 2 then
@@ -2138,6 +2437,11 @@ local function NextOptionValue(key)
 	return items[1].key
 end
 
+function ResetSizes()
+	SetOption('hud_size', 140)
+	SetOption('ledger_size', 120)
+end
+
 local ACTIONS = {
 	revolver_fire = function() Fire() end,
 	revolver_mark = function() Mark() end,
@@ -2167,8 +2471,8 @@ function widget:Initialize()
 	local units = Spring.GetTeamUnits(myTeamID) or {}
 	for i = 1, #units do
 		local unitID = units[i]
-		local defID = spGetUnitDefID(unitID)
-		local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
+		local defID = Spring.GetUnitDefID(unitID)
+		local _, _, _, _, buildProgress = Spring.GetUnitHealth(unitID)
 		if (buildProgress or 1) >= 1 then
 			widget:UnitFinished(unitID, defID, myTeamID)
 		end
@@ -2177,7 +2481,7 @@ function widget:Initialize()
 		if teamID ~= myTeamID then
 			local allied = Spring.GetTeamUnits(teamID) or {}
 			for i = 1, #allied do
-				local defID = spGetUnitDefID(allied[i])
+				local defID = Spring.GetUnitDefID(allied[i])
 				if padDefs[defID] then
 					widget:UnitFinished(allied[i], defID, teamID)
 				end
@@ -2240,7 +2544,7 @@ function widget:Shutdown()
 	-- Hand fire states back.
 	for unitID, mag in pairs(magpies) do
 		if mag.savedFire ~= nil then
-			spGiveOrderToUnit(unitID, CMD_FIRE_STATE, {mag.savedFire}, 0)
+			Spring.GiveOrderToUnit(unitID, C.FIRE_STATE, {mag.savedFire}, 0)
 		end
 	end
 	WG.Revolver = nil
@@ -2253,43 +2557,134 @@ end
 local CardLines
 do
 
-local GL_LINE_STRIP, GL_TRIANGLE_FAN, GL_LINES = GL.LINE_STRIP, GL.TRIANGLE_FAN, GL.LINES
+local GroundAt
+local D = {} -- drawing helpers
+
 
 local COLOR = {
 	ready     = {0.67, 0.57, 1.0, 1},
-	attacking = {0.85, 0.71, 0.36, 1},
-	returning = {1.0, 0.56, 0.53, 1},
-	pad       = {0.65, 0.63, 0.71, 1},
+	attacking = {0.95, 0.76, 0.36, 1},
+	returning = {1.0, 0.50, 0.47, 1},
+	pad       = {0.55, 0.78, 0.95, 1},
 	idle      = {0.65, 0.63, 0.71, 1},
 	empty     = {0.4, 0.4, 0.45, 0.6},
-	text      = {0.92, 0.91, 0.95, 1},
-	muted     = {0.65, 0.63, 0.71, 1},
-	panel     = {0.08, 0.08, 0.11, 0.78},
-	ring      = {0.2, 0.2, 0.26, 0.9},
+	text      = {0.94, 0.93, 0.97, 1},
+	muted     = {0.66, 0.64, 0.73, 1},
+	faint     = {0.48, 0.47, 0.55, 1},
+	good      = {0.45, 0.86, 0.58, 1},
+	panelTop  = {0.13, 0.13, 0.17, 0.93},
+	panelBot  = {0.07, 0.07, 0.095, 0.93},
+	edge      = {1, 1, 1, 0.10},
+	shadow    = {0, 0, 0, 0.35},
+	track     = {1, 1, 1, 0.08},
+	grid      = {1, 1, 1, 0.07},
+	tile      = {1, 1, 1, 0.045},
 }
 
-local function ChamberCentre(w)
-	local vsx = Spring.GetViewGeometry()
-	local _, vsy = Spring.GetViewGeometry()
-	local cx, cy = vsx*hud.fx, vsy*hud.fy
-	local angle = pi/2 - (w - 1)*pi/3
-	return cx + cos(angle)*(hud.radius - hud.chamber - 4), cy + sin(angle)*(hud.radius - hud.chamber - 4), cx, cy
+-- Outlined vector font when the engine provides one, plain gl.Text otherwise.
+local font
+local function Text(str, x, y, size, opts, c)
+	c = c or COLOR.text
+	if font == nil then
+		local ok, f = pcall(gl.LoadFont, "FreeSansBold.otf", 40, 6, 4)
+		font = (ok and (type(f) == "userdata" or type(f) == "table")) and f or false
+	end
+	if font then
+		font:SetTextColor(c[1], c[2], c[3], c[4] or 1)
+		font:SetOutlineColor(0, 0, 0, 0.8*(c[4] or 1))
+		font:Print(str, x, y, size, opts)
+	else
+		gl.Color(c[1], c[2], c[3], c[4] or 1)
+		gl.Text(str, x, y, size, opts)
+	end
 end
 
-local function Circle(x, y, r, segments, fraction)
-	fraction = fraction or 1
-	gl.BeginEnd(GL_LINE_STRIP, function()
-		local n = max(2, floor(segments*fraction))
-		for i = 0, n do
-			local a = pi/2 - 2*pi*fraction*i/n
-			gl.Vertex(x + cos(a)*r, y + sin(a)*r)
+function D.TextWidth(str, size)
+	local w = font and font:GetTextWidth(str) or (gl.GetTextWidth and gl.GetTextWidth(str))
+	if type(w) ~= "number" then
+		w = #str*0.55
+	end
+	return w*size
+end
+
+function D.Mix(a, b, f)
+	return {a[1] + (b[1] - a[1])*f, a[2] + (b[2] - a[2])*f, a[3] + (b[3] - a[3])*f, (a[4] or 1) + ((b[4] or 1) - (a[4] or 1))*f}
+end
+
+function D.Alpha(c, a)
+	return {c[1], c[2], c[3], a}
+end
+
+-- Rounded rectangle with a vertical gradient (top colour, bottom colour).
+function D.RoundRect(x1, y1, x2, y2, r, top, bottom)
+	bottom = bottom or top
+	r = max(0, min(r, (x2 - x1)*0.5, (y2 - y1)*0.5))
+	local function V(x, y)
+		local f = (y2 > y1) and (y - y1)/(y2 - y1) or 0
+		gl.Color(bottom[1] + (top[1] - bottom[1])*f, bottom[2] + (top[2] - bottom[2])*f, bottom[3] + (top[3] - bottom[3])*f,
+			(bottom[4] or 1) + ((top[4] or 1) - (bottom[4] or 1))*f)
+		gl.Vertex(x, y)
+	end
+	gl.BeginEnd(GL.TRIANGLE_FAN, function()
+		V((x1 + x2)*0.5, (y1 + y2)*0.5)
+		local corners = {{x2 - r, y2 - r, 0}, {x1 + r, y2 - r, 0.5*pi}, {x1 + r, y1 + r, pi}, {x2 - r, y1 + r, 1.5*pi}}
+		for i = 1, 4 do
+			local c = corners[i]
+			for j = 0, 5 do
+				local a = c[3] + j/5*0.5*pi
+				V(c[1] + cos(a)*r, c[2] + sin(a)*r)
+			end
+		end
+		V(x2, y2 - r)
+	end)
+end
+
+function D.RoundOutline(x1, y1, x2, y2, r, c)
+	r = max(0, min(r, (x2 - x1)*0.5, (y2 - y1)*0.5))
+	gl.Color(c)
+	gl.BeginEnd(GL.LINE_LOOP, function()
+		local corners = {{x2 - r, y2 - r, 0}, {x1 + r, y2 - r, 0.5*pi}, {x1 + r, y1 + r, pi}, {x2 - r, y1 + r, 1.5*pi}}
+		for i = 1, 4 do
+			local c = corners[i]
+			for j = 0, 5 do
+				local a = c[3] + j/5*0.5*pi
+				gl.Vertex(c[1] + cos(a)*r, c[2] + sin(a)*r)
+			end
 		end
 	end)
 end
 
-local function Disc(x, y, r, segments)
-	gl.BeginEnd(GL_TRIANGLE_FAN, function()
+-- Panel: soft shadow, gradient body, faint edge.
+function D.Panel(x1, y1, x2, y2, r)
+	D.RoundRect(x1 + 2, y1 - 4, x2 + 4, y2 - 2, r + 2, COLOR.shadow)
+	D.RoundRect(x1, y1, x2, y2, r, COLOR.panelTop, COLOR.panelBot)
+	D.RoundOutline(x1, y1, x2, y2, r, COLOR.edge)
+end
+
+-- Ring segment from 12 o'clock, clockwise, `fraction` of the way round.
+function D.Arc(x, y, r1, r2, fraction, segments, c)
+	if fraction <= 0 then
+		return
+	end
+	fraction = min(1, fraction)
+	local n = max(2, ceil(segments*fraction))
+	gl.Color(c)
+	gl.BeginEnd(GL.TRIANGLE_STRIP, function()
+		for i = 0, n do
+			local a = pi/2 - 2*pi*fraction*i/n
+			local ca, sa = cos(a), sin(a)
+			gl.Vertex(x + ca*r1, y + sa*r1)
+			gl.Vertex(x + ca*r2, y + sa*r2)
+		end
+	end)
+end
+
+-- Disc with a radial gradient.
+function D.Disc(x, y, r, segments, inner, outer)
+	gl.BeginEnd(GL.TRIANGLE_FAN, function()
+		gl.Color(inner)
 		gl.Vertex(x, y)
+		gl.Color(outer or inner)
 		for i = 0, segments do
 			local a = 2*pi*i/segments
 			gl.Vertex(x + cos(a)*r, y + sin(a)*r)
@@ -2297,81 +2692,161 @@ local function Disc(x, y, r, segments)
 	end)
 end
 
+-- Text on a rounded pill, centred on x.
+function D.Pill(str, x, y, size, c, bg)
+	local w = D.TextWidth(str, size) + size*1.2
+	local h = size*1.6
+	D.RoundRect(x - w*0.5, y - h*0.5, x + w*0.5, y + h*0.5, h*0.5, bg or {0.07, 0.07, 0.09, 0.85})
+	Text(str, x, y, size, "cv", c)
+	return w, h
+end
+
+function D.UiScale()
+	local _, vsy = Spring.GetViewGeometry()
+	return max(0.75, vsy/1080)
+end
+
+-- Cylinder geometry at its current size.
+function D.HudGeometry()
+	local k = D.UiScale()*Opt('hud_size')/100
+	hud.scale = k
+	hud.radius = 92*k
+	hud.chamber = 0.27*hud.radius
+	hud.ring = 0.63*hud.radius
+	hud.hub = 0.21*hud.radius
+	return k
+end
+
+local function ChamberCentre(w)
+	D.HudGeometry()
+	local vsx, vsy = Spring.GetViewGeometry()
+	-- Kept whole on screen whatever its size
+	local R = hud.radius
+	local cx, cy = max(R, min(vsx - R, vsx*hud.fx)), max(R, min(vsy - R, vsy*hud.fy))
+	local angle = pi/2 - (w - 1)*pi/3
+	return cx + cos(angle)*hud.ring, cy + sin(angle)*hud.ring, cx, cy
+end
+
+-- Selection, kept by SelectionChanged; flight path card state.
+local view = {selected = {}, selSet = {}, path = nil, hoverHub = false}
+
+local function WingSelected(w)
+	for unitID in pairs(wings[w].units) do
+		if view.selSet[unitID] then
+			return true
+		end
+	end
+	return false
+end
+
 local function DrawCylinder()
 	local _, _, cx, cy = ChamberCentre(1)
-	gl.Color(COLOR.panel)
-	Disc(cx, cy, hud.radius, 48)
+	local R, k = hud.radius, hud.scale
+	-- Body
+	D.Disc(cx + 3*k, cy - 4*k, R + 3*k, 64, COLOR.shadow, {0, 0, 0, 0})
+	D.Disc(cx, cy, R, 64, {0.15, 0.15, 0.19, 0.92}, {0.06, 0.06, 0.08, 0.92})
+	D.Arc(cx, cy, R - 1.5*k, R, 1, 64, COLOR.edge)
+
 	for w = 1, WING_COUNT do
 		local x, y = ChamberCentre(w)
+		local cr = hud.chamber
 		local s = WingSummary(w)
-		gl.Color(COLOR.ring)
-		Disc(x, y, hud.chamber, 24)
-		gl.LineWidth(3)
-		gl.Color(COLOR.ring)
-		Circle(x, y, hud.chamber - 3, 32, 1)
-		if s.n > 0 then
-			gl.Color(COLOR[s.state] or COLOR.idle)
-			Circle(x, y, hud.chamber - 3, 32, s.ammo)
+		local stateColor = COLOR[s.state] or COLOR.idle
+		local selected = WingSelected(w)
+		if s.chambered and s.n > 0 then
+			D.Arc(x, y, cr*1.02, cr*1.16, 1, 40, D.Alpha(COLOR.ready, 0.28))
 		end
-		gl.LineWidth(1)
-		gl.Color(COLOR.text)
-		gl.Text(WING_LETTER[w], x, y + 2, 15, "cv")
+		if selected then
+			D.Arc(x, y, cr*1.04, cr*1.12, 1, 40, {1, 1, 1, 0.9})
+		end
+		local inner = s.n > 0 and D.Mix({0.22, 0.22, 0.28, 0.97}, stateColor, 0.18) or {0.16, 0.16, 0.2, 0.9}
+		D.Disc(x, y, cr, 40, inner, {0.11, 0.11, 0.14, 0.97})
+		-- Ammo ring, health ring inside it
+		D.Arc(x, y, cr*0.80, cr*0.95, 1, 40, COLOR.track)
+		if s.n > 0 then
+			D.Arc(x, y, cr*0.80, cr*0.95, s.ammo, 40, stateColor)
+			D.Arc(x, y, cr*0.70, cr*0.76, 1, 40, COLOR.track)
+			D.Arc(x, y, cr*0.70, cr*0.76, s.health, 40, D.Mix(COLOR.returning, COLOR.good, max(0, min(1, (s.health - 0.3)/0.6))))
+		end
+		Text(WING_LETTER[w], x, y + cr*0.2, cr*0.58, "cvo", s.n > 0 and COLOR.text or COLOR.faint)
 		local sub
 		if s.n == 0 then
-			sub = "-"
+			sub = "empty"
 		elseif s.state == "pad" or s.state == "returning" then
-			sub = s.n .. " " .. ceil(WingETA(w)) .. "s"
+			sub = s.n .. " · " .. ceil(WingETA(w)) .. "s"
 		else
-			sub = s.n .. " " .. floor(s.ammo*100 + 0.5) .. "%"
+			sub = s.n .. " · " .. floor(s.ammo*100 + 0.5) .. "%"
 		end
-		gl.Color(COLOR.muted)
-		gl.Text(sub, x, y - 12, 10, "cv")
+		Text(sub, x, y - cr*0.32, cr*0.29, "cvo", s.n > 0 and COLOR.muted or COLOR.faint)
 	end
-	gl.Color(COLOR.muted)
+
+	-- Hub: Magpies ready to launch; click for the menu.
+	local pool = 0
+	for wi = 1, WING_COUNT do
+		local s = WingSummary(wi)
+		if s.chambered then
+			pool = pool + s.n
+		end
+	end
+	D.Disc(cx, cy, hud.hub, 32, view.hoverHub and {0.27, 0.25, 0.36, 0.97} or {0.2, 0.2, 0.25, 0.97}, {0.12, 0.12, 0.15, 0.97})
+	D.Arc(cx, cy, hud.hub - 1.2*k, hud.hub, 1, 32, COLOR.edge)
+	Text(tostring(pool), cx, cy + hud.hub*0.18, hud.hub*0.62, "cvo", pool > 0 and COLOR.ready or COLOR.faint)
+	Text("menu", cx, cy - hud.hub*0.45, hud.hub*0.30, "cvo", COLOR.muted)
+
 	if Opt('fleet_advisor') then
 		local plan = PadPlan()
-		gl.Text("Pads " .. plan.slots .. " / need " .. plan.need .. "   Fleet " .. plan.fleet, cx, cy - hud.radius - 14, 11, "cv")
+		local short = plan.need > plan.slots
+		D.Pill(string.format("Fleet %d · pad slots %d, need %d", plan.fleet, plan.slots, plan.need), cx, cy - R - 13*k, 10.5*k,
+			short and COLOR.returning or COLOR.muted)
 	end
-	gl.Text("menu", cx, cy, 9, "cv")
-	for i = 1, #alerts do
-		local a = alerts[#alerts - i + 1]
-		if frame - a.frame < 30*8 then
-			gl.Text(a.text, cx, cy + hud.radius + 6 + 14*(i - 1), 11, "cv")
+	local shown = 0
+	for i = #alerts, 1, -1 do
+		local a = alerts[i]
+		local age = frame - a.frame
+		if age < 30*8 and shown < 3 then
+			local fade = min(1, (30*8 - age)/45)
+			D.Pill(a.text, cx, cy + R + 14*k + shown*20*k, 10.5*k, D.Alpha(COLOR.text, fade), {0.07, 0.07, 0.09, 0.85*fade})
+			shown = shown + 1
 		end
 	end
 	gl.Color(1, 1, 1, 1)
 end
 
+-- Breakpoint card lines; `cells` is the kill table as {label, strafe, loopback} rows (lines 2 to 2 + #cells).
 function CardLines(target)
-	local defID = spGetUnitDefID(target)
+	local defID = Spring.GetUnitDefID(target)
 	local ud = defID and UnitDefs[defID]
 	if not ud then
 		return nil
 	end
 	local lines = {ud.humanName or ud.name}
+	local cells
 	local entryS = BreakpointEntry(ud.name, "strafe")
 	if entryS then
+		cells = {}
 		local function cell(mode, p)
 			local entry = BreakpointEntry(ud.name, mode)
 			local v = entry and entry.slow[p]
 			return v and (v[1] .. " (lose " .. v[2] .. ")") or "no"
 		end
 		lines[#lines + 1] = "Kill within     Strafe        Loopback"
+		cells[1] = {"Kill within", "Strafe", "Loopback"}
 		local labels = {[1] = "1 pass", [2] = "2 passes", [3] = "3 passes", [5] = "5 passes", [99] = "1 sortie"}
 		for i = 1, #defs.passes do
 			local p = defs.passes[i]
 			lines[#lines + 1] = string.format("%-15s %-13s %s", labels[p], cell("strafe", p), cell("loopback", p))
+			cells[#cells + 1] = {labels[p], cell("strafe", p), cell("loopback", p)}
 		end
 	end
 	local horizon = tonumber(Opt('horizon'))
 	local mode = AdviseMode(ud.name, horizon)
 	local need, lost, used, source = Need(target, mode, horizon)
-	local slow = spGetUnitRulesParam(target, "slowState") or 0
+	local slow = Spring.GetUnitRulesParam(target, "slowState") or 0
 	lines[#lines + 1] = string.format("Now: %s, %d Magpies%s (%s)%s", mode == "loopback" and "Loopback" or "Strafe", need,
 		(lost and lost > 0) and (", lose " .. lost) or "", source == "table" and "Magpie Manual" or "estimate",
 		slow > 0.01 and string.format(", slowed %d%%", floor(slow*100)) or "")
 
-	local tx, _, tz = spGetUnitPosition(target)
+	local tx, _, tz = Spring.GetUnitPosition(target)
 	if Opt('stockpile_watch') and tx then
 		local missiles, exact, n = MissilesCovering(tx, tz)
 		if n > 0 then
@@ -2387,131 +2862,279 @@ function CardLines(target)
 	else
 		lines[#lines + 1] = "No Magpies chambered."
 	end
-	return lines
+	return lines, cells
+end
+
+-- Card next to the cursor: title, optional table, then lines. Returns its height.
+local function DrawCardAt(x, top, title, cells, lines, k, lineColors)
+	local size = 12*k
+	local rowH = 16*k
+	local w = 340*k
+	local h = 30*k + (cells and (#cells*rowH + 8*k) or 0) + #lines*rowH + 6*k
+	local vsx = Spring.GetViewGeometry()
+	if x + w > vsx - 8 then
+		x = x - w - 48*k
+	end
+	if top - h < 8 then
+		top = h + 8
+	end
+	D.Panel(x, top - h, x + w, top, 6*k)
+	Text(title, x + 10*k, top - 18*k, 14*k, "vo", COLOR.text)
+	local y = top - 30*k
+	if cells then
+		local col = {x + 10*k, x + 110*k, x + 225*k}
+		for i = 1, #cells do
+			local c = cells[i]
+			y = y - rowH
+			if i == 1 then
+				D.RoundRect(x + 6*k, y - 3*k, x + w - 6*k, y + rowH - 3*k, 3*k, COLOR.tile)
+			end
+			for j = 1, 3 do
+				local color = (i == 1 or j == 1) and COLOR.muted or (c[j] == "no" and COLOR.faint or COLOR.text)
+				Text(c[j], col[j], y + rowH*0.35, size*(i == 1 and 0.9 or 1), "vo", color)
+			end
+		end
+		y = y - 8*k
+	end
+	for i = 1, #lines do
+		y = y - rowH
+		Text(lines[i], x + 10*k, y + rowH*0.35, size, "vo", (lineColors and COLOR[lineColors[i]]) or COLOR.muted)
+	end
+	gl.Color(1, 1, 1, 1)
+	return h
 end
 
 local function DrawCard()
 	local target = HoveredEnemy()
 	if not target then
-		return
+		return 0
 	end
-	local lines = CardLines(target)
+	local lines, cells = CardLines(target)
 	if not lines then
-		return
+		return 0
 	end
-	local mx, my = spGetMouseState()
-	local w, h = 330, 16*#lines + 10
-	local x, y = mx + 24, my - 12
-	gl.Color(COLOR.panel)
-	gl.Rect(x, y - h, x + w, y)
-	for i = 1, #lines do
-		gl.Color(i == 1 and COLOR.text or COLOR.muted)
-		gl.Text(lines[i], x + 8, y - 16*i, 12, "o")
+	local rest = {}
+	for i = 2 + (cells and #cells or 0), #lines do
+		rest[#rest + 1] = lines[i]
 	end
-	gl.Color(1, 1, 1, 1)
+	local mx, my = Spring.GetMouseState()
+	local k = D.UiScale()
+	return DrawCardAt(mx + 24*k, my - 12*k, lines[1], cells, rest, k)
+end
+
+-- Ledger layout at its current size: x, top, width, height, scale.
+function D.LedgerScale()
+	local k = D.UiScale()*Opt('ledger_size')/100
+	ledgerPanel.scale = k
+	return k
 end
 
 local function LedgerRect()
 	local vsx, vsy = Spring.GetViewGeometry()
-	local h = ledgerPanel.h + (Opt('fleet_advisor') and 70 or 0)
-	return vsx*ledgerPanel.fx, vsy*ledgerPanel.fy, ledgerPanel.w, h
+	local k = D.LedgerScale()
+	local h = ledgerPanel.h
+	if #history > 0 and Opt('career_history') then
+		h = h + 14
+	end
+	if Opt('fleet_advisor') then
+		h = h + 14 + 12*#(FleetAdvice())
+	end
+	local w = ledgerPanel.w*k
+	h = h*k
+	return max(0, min(vsx - w, vsx*ledgerPanel.fx)), max(h, min(vsy, vsy*ledgerPanel.fy)), w, h, k
+end
+
+function D.Tile(x, y, w, h, k, label, value, note, valueColor)
+	D.RoundRect(x, y - h, x + w, y, 4*k, COLOR.tile)
+	Text(label, x + 7*k, y - 9*k, 8.5*k, "vo", COLOR.muted)
+	Text(value, x + 7*k, y - 23*k, 15*k, "vo", valueColor or COLOR.text)
+	if note then
+		Text(note, x + 7*k, y - 36*k, 8*k, "vo", COLOR.faint)
+	end
+end
+
+function D.Kilo(v)
+	if v >= 10000 then
+		return string.format("%.0fk", v/1000)
+	elseif v >= 1000 then
+		return string.format("%.1fk", v/1000)
+	end
+	return tostring(floor(v))
 end
 
 local function DrawLedger()
-	local x, y, w, h = LedgerRect()
-	gl.Color(COLOR.panel)
-	gl.Rect(x, y - h, x + w, y)
+	local x, y, w, h, k = LedgerRect()
+	D.Panel(x, y - h, x + w, y, 7*k)
 	local t = GameTotals()
-	gl.Color(COLOR.text)
 	local view = Opt('ledger_view')
-	gl.Text("Revolver ledger", x + 8, y - 16, 13, "o")
-	gl.Color(COLOR.muted)
-	gl.Text(view == 'runs' and "[per run]  per target" or "per run  [per target]", x + w - 8, y - 16, 11, "ro")
-	gl.Text(string.format("Runs %d  Bursts %d  Hit %s  Kills %d  Lost %d", t.runs, t.bursts,
-		t.hit and string.format("%.2f", t.hit) or "-", t.kills, t.lost), x + 8, y - 32, 11, "o")
-	gl.Text(string.format("Metal killed %d  lost %d  Pad energy %d", totals.metalKilled, totals.metalLost,
-		floor(totals.rearmEnergy + totals.repairEnergy)), x + 8, y - 46, 11, "o")
-	if #history > 0 and Opt('career_history') then
-		local sum, n = 0, 0
-		for i = max(1, #history - 9), #history do
-			sum, n = sum + history[i].hit, n + 1
-		end
-		gl.Text(string.format("Last %d games: hit %.2f", n, sum/n), x + 8, y - 60, 11, "o")
+
+	-- Title bar with view tabs
+	Text("Revolver ledger", x + 10*k, y - 15*k, 13*k, "vo", COLOR.text)
+	local tabs = {{'runs', "Runs"}, {'targets', "Targets"}}
+	local tx = x + w - 8*k
+	for i = #tabs, 1, -1 do
+		local tw = D.TextWidth(tabs[i][2], 10*k) + 14*k
+		local active = view == tabs[i][1]
+		D.RoundRect(tx - tw, y - 23*k, tx, y - 7*k, 8*k, active and D.Alpha(COLOR.ready, 0.85) or COLOR.tile)
+		Text(tabs[i][2], tx - tw*0.5, y - 15*k, 10*k, "cv", active and {0.08, 0.06, 0.15, 1} or COLOR.muted)
+		tx = tx - tw - 4*k
 	end
 
-	local gx, gy, gw, gh = x + 30, y - ledgerPanel.h + 20, w - 40, ledgerPanel.h - 100
+	-- Stat tiles
+	local tileY, tileH, gap = y - 30*k, 42*k, 6*k
+	local tileW = (w - 20*k - 3*gap)/4
+	local expectedAll, en = 0, 0
+	for i = 1, #runs do
+		local e = ExpectedHitFactor(runs[i])
+		if e and runs[i].bursts > runs[i].wasted then
+			expectedAll, en = expectedAll + e, en + 1
+		end
+	end
+	local hitColor = COLOR.text
+	if t.hit and en > 0 then
+		hitColor = (t.hit >= expectedAll/en*0.9) and COLOR.good or COLOR.attacking
+	end
+	D.Tile(x + 10*k, tileY, tileW, tileH, k, "HIT RATE", t.hit and string.format("%d%%", floor(t.hit*100 + 0.5)) or "-",
+		en > 0 and string.format("manual %d%%", floor(expectedAll/en*100 + 0.5)) or "no aimed bursts", hitColor)
+	D.Tile(x + 10*k + (tileW + gap), tileY, tileW, tileH, k, "KILLS", tostring(t.kills), D.Kilo(totals.metalKilled) .. " metal")
+	local trade = totals.metalLost > 0 and totals.metalKilled/totals.metalLost or nil
+	D.Tile(x + 10*k + 2*(tileW + gap), tileY, tileW, tileH, k, "TRADE", trade and string.format("%.1fx", trade) or "-",
+		"lost " .. t.lost .. " (" .. D.Kilo(totals.metalLost) .. ")", trade and (trade >= 1 and COLOR.good or COLOR.returning) or COLOR.text)
+	local wasted = 0
+	for i = 1, #runs do
+		wasted = wasted + runs[i].wasted
+	end
+	D.Tile(x + 10*k + 3*(tileW + gap), tileY, tileW, tileH, k, "BURSTS", D.Kilo(t.bursts),
+		t.bursts > 0 and string.format("%d%% out of range", floor(wasted/t.bursts*100 + 0.5)) or (t.runs .. " runs"))
+
+	-- Chart
+	local gx, gw = x + 34*k, w - 46*k
+	local gy, gh = y - 196*k, 108*k
 	if view == 'runs' then
-		-- Hit factor per run, last 20, against the simulated factor.
-		gl.Color(COLOR.ring)
-		gl.Rect(gx, gy, gx + gw, gy + 1)
-		gl.Rect(gx, gy + gh, gx + gw, gy + gh + 1)
-		gl.Color(COLOR.muted)
-		gl.Text("1.0", gx - 4, gy + gh, 9, "rv")
-		gl.Text("0", gx - 4, gy, 9, "rv")
+		for i = 0, 4 do
+			local ly = gy + gh*i/4
+			gl.Color(COLOR.grid)
+			gl.Rect(gx, ly, gx + gw, ly + max(1, k))
+			Text(string.format("%d%%", i*25), gx - 5*k, ly, 8*k, "rv", COLOR.faint)
+		end
 		local first = max(1, #runs - 19)
-		local slot = gw/20
+		local slot = gw/max(10, #runs - first + 1)
+		local avg = {}
+		local any = false
 		for i = first, #runs do
 			local run = runs[i]
 			local hit = RunHitFactor(run)
 			local px = gx + (i - first)*slot + slot*0.5
 			if hit then
-				gl.Color(run.mode == "loopback" and COLOR.attacking or COLOR.ready)
-				gl.Rect(px - slot*0.3, gy, px + slot*0.3, gy + min(1, hit)*gh)
+				any = true
+				local c = run.mode == "loopback" and COLOR.attacking or COLOR.ready
+				D.RoundRect(px - slot*0.32, gy, px + slot*0.32, gy + max(2*k, min(1, hit)*gh), 2*k, c, D.Alpha(c, 0.55))
+				-- rolling average of the last five measured runs
+				local sum, n = 0, 0
+				for j = i, max(first, i - 4), -1 do
+					local hj = RunHitFactor(runs[j])
+					if hj then
+						sum, n = sum + hj, n + 1
+					end
+				end
+				avg[#avg + 1] = {px, gy + min(1, sum/n)*gh}
 			end
 			local expected = ExpectedHitFactor(run)
 			if expected then
 				gl.Color(COLOR.text)
-				gl.Rect(px - slot*0.45, gy + expected*gh, px + slot*0.45, gy + expected*gh + 2)
+				gl.Rect(px - slot*0.45, gy + expected*gh - k, px + slot*0.45, gy + expected*gh + k)
 			end
+			Text(WING_LETTER[run.wing] or "-", px, gy - 7*k, 7.5*k, "cv", COLOR.faint)
 		end
+		if #avg > 1 then
+			gl.LineWidth(2*k)
+			gl.Color(1, 1, 1, 0.75)
+			gl.BeginEnd(GL.LINE_STRIP, function()
+				for i = 1, #avg do
+					gl.Vertex(avg[i][1], avg[i][2])
+				end
+			end)
+			gl.LineWidth(1)
+		end
+		if not any then
+			Text(#runs == 0 and "No runs yet. A bar appears for each sortie once Magpies fire."
+				or "No aimed bursts measured yet.", gx + gw*0.5, gy + gh*0.5, 10*k, "cvo", COLOR.muted)
+		end
+		-- Legend
+		local lx, ly = gx, gy - 20*k
+		local function Key(c, label, bar)
+			if bar then
+				D.RoundRect(lx, ly - 4*k, lx + 8*k, ly + 4*k, 2*k, c)
+			else
+				gl.Color(c)
+				gl.Rect(lx, ly - k, lx + 10*k, ly + k)
+			end
+			Text(label, lx + 13*k, ly, 8.5*k, "vo", COLOR.muted)
+			lx = lx + 13*k + D.TextWidth(label, 8.5*k) + 12*k
+		end
+		Key(COLOR.ready, "Strafe", true)
+		Key(COLOR.attacking, "Loopback", true)
+		Key(COLOR.text, "Magpie Manual")
+		Key({1, 1, 1, 0.75}, "Average of 5")
 	else
-		-- Hit factor per target type and style: bar is measured, tick is the Magpie Manual figure.
+		-- Hit rate per target type and style: bar measured, tick from the Magpie Manual.
 		local list = TargetTable()
 		local rows = min(6, #list)
 		if rows == 0 then
-			gl.Color(COLOR.muted)
-			gl.Text("No single-target runs yet.", gx, gy + gh*0.5, 11, "o")
+			Text("No single-target runs yet.", gx + gw*0.5, gy + gh*0.5, 10*k, "cvo", COLOR.muted)
 		end
 		local rowH = gh/6
-		local labelW = 120
+		local labelW = 112*k
 		for i = 1, rows do
 			local a = list[i]
 			local ry = gy + gh - rowH*i
-			local name = BreakpointEntry(a.target, a.mode) and BreakpointEntry(a.target, a.mode).name or a.target
-			gl.Color(COLOR.muted)
-			gl.Text(string.format("%s %s", name, a.mode == "loopback" and "L" or "S"), gx - 22, ry + rowH*0.3, 10, "o")
-			local bx, bw = gx + labelW - 22, gw - labelW - 30
-			gl.Color(a.mode == "loopback" and COLOR.attacking or COLOR.ready)
-			gl.Rect(bx, ry + 2, bx + bw*min(1, a.measured), ry + rowH - 2)
+			local entry = BreakpointEntry(a.target, a.mode)
+			local name = entry and entry.name or a.target
+			Text(string.format("%s %s", name, a.mode == "loopback" and "(L)" or "(S)"), gx - 24*k, ry + rowH*0.5, 9*k, "vo", COLOR.muted)
+			local bx, bw = gx + labelW - 24*k, gw - labelW - 26*k
+			local c = a.mode == "loopback" and COLOR.attacking or COLOR.ready
+			D.RoundRect(bx, ry + 2*k, bx + bw, ry + rowH - 2*k, 2*k, COLOR.tile)
+			D.RoundRect(bx, ry + 2*k, bx + bw*min(1, a.measured), ry + rowH - 2*k, 2*k, c, D.Alpha(c, 0.6))
 			gl.Color(COLOR.text)
-			gl.Rect(bx + bw*a.expected - 1, ry, bx + bw*a.expected + 1, ry + rowH)
-			gl.Text(string.format("%.2f/%.2f", a.measured, a.expected), bx + bw + 4, ry + rowH*0.3, 9, "o")
+			gl.Rect(bx + bw*a.expected - k, ry, bx + bw*a.expected + k, ry + rowH)
+			Text(string.format("%d%% / %d%%", floor(a.measured*100 + 0.5), floor(a.expected*100 + 0.5)), bx + bw + 4*k, ry + rowH*0.5, 8.5*k, "vo", COLOR.muted)
 		end
+		Text("Bar: measured.  Tick: Magpie Manual.", gx, gy - 20*k, 8.5*k, "vo", COLOR.faint)
 	end
+
+	local ly = gy - 36*k
 	if calibration then
 		local list = CalibrationTable()
-		gl.Color(COLOR.text)
-		for i = 1, min(1, #list) do
-			local a = list[i]
-			gl.Text(string.format("Calibrating %s %s: %.2f vs %.2f (%d runs)", a.target, a.mode, a.measured, a.expected, a.runs),
-				x + 8, y - 74, 10, "o")
+		local a = list[1]
+		if a then
+			Text(string.format("Calibrating %s %s: %d%% vs %d%% (%d runs)", a.target, a.mode, floor(a.measured*100 + 0.5), floor(a.expected*100 + 0.5), a.runs),
+				x + w - 10*k, ly + 16*k, 8.5*k, "rvo", COLOR.attacking)
 		end
 	end
+	if #history > 0 and Opt('career_history') then
+		local sum, n = 0, 0
+		for i = max(1, #history - 9), #history do
+			sum, n = sum + history[i].hit, n + 1
+		end
+		Text(string.format("Last %d games: hit rate %d%%", n, floor(sum/n*100 + 0.5)), x + 10*k, ly, 9*k, "vo", COLOR.muted)
+		ly = ly - 14*k
+	end
 	if Opt('fleet_advisor') then
+		gl.Color(COLOR.grid)
+		gl.Rect(x + 10*k, ly + 6*k, x + w - 10*k, ly + 6*k + max(1, k))
 		local lines = FleetAdvice()
-		gl.Color(COLOR.muted)
 		for i = 1, #lines do
-			gl.Text(lines[i], x + 8, y - ledgerPanel.h - 12*i + 4, 10, "o")
+			Text(lines[i], x + 10*k, ly - 12*k*(i - 1) - 4*k, 9*k, "vo", (i == 3 and lines[i]:find("^Short")) and COLOR.returning or COLOR.muted)
 		end
 	end
 	gl.Color(1, 1, 1, 1)
 end
 
 -- In-game feature menu
-local menuPanel = {w = 420, row = 18}
 
 local function MenuLayout()
 	local vsx, vsy = Spring.GetViewGeometry()
+	local k = D.UiScale()
 	local rows = {}
 	for i = 1, #MENU do
 		rows[#rows + 1] = {header = MENU[i].title}
@@ -2520,14 +3143,16 @@ local function MenuLayout()
 		end
 	end
 	rows[#rows + 1] = {close = true}
-	local h = #rows*menuPanel.row + 30
-	local x = floor(vsx*0.5 - menuPanel.w*0.5)
+	local rowH = 20*k
+	local w = 440*k
+	local h = #rows*rowH + 36*k
+	local x = floor(vsx*0.5 - w*0.5)
 	local top = floor(vsy*0.5 + h*0.5)
 	for i = 1, #rows do
-		rows[i].y1 = top - 26 - i*menuPanel.row
-		rows[i].y2 = rows[i].y1 + menuPanel.row
+		rows[i].y1 = top - 30*k - i*rowH
+		rows[i].y2 = rows[i].y1 + rowH
 	end
-	return rows, x, top, menuPanel.w, h
+	return rows, x, top, w, h, k
 end
 
 local function OptionText(key)
@@ -2544,26 +3169,36 @@ local function OptionText(key)
 end
 
 local function DrawMenu()
-	local rows, x, top, w, h = MenuLayout()
-	gl.Color(COLOR.panel)
-	gl.Rect(x, top - h, x + w, top)
-	gl.Color(COLOR.text)
-	gl.Text("Revolver features", x + 10, top - 20, 14, "o")
+	local rows, x, top, w, h, k = MenuLayout()
+	local mx, my = Spring.GetMouseState()
+	D.Panel(x, top - h, x + w, top, 8*k)
+	Text("Revolver features", x + 12*k, top - 17*k, 14*k, "vo", COLOR.text)
+	Text("click to change", x + w - 12*k, top - 17*k, 9*k, "rvo", COLOR.faint)
 	for i = 1, #rows do
 		local r = rows[i]
+		local midY = (r.y1 + r.y2)*0.5
+		local hover = mx >= x and mx <= x + w and my >= r.y1 and my < r.y2
 		if r.header then
-			gl.Color(COLOR.attacking)
-			gl.Text(r.header, x + 10, r.y1 + 4, 12, "o")
+			Text(string.upper(r.header), x + 12*k, midY, 9.5*k, "vo", COLOR.attacking)
 		elseif r.close then
-			gl.Color(COLOR.muted)
-			gl.Text("Close", x + w*0.5, r.y1 + 4, 12, "co")
+			D.RoundRect(x + w*0.5 - 40*k, r.y1 + 2*k, x + w*0.5 + 40*k, r.y2 - 2*k, 8*k, hover and D.Alpha(COLOR.ready, 0.5) or COLOR.tile)
+			Text("Close", x + w*0.5, midY, 10.5*k, "cv", COLOR.text)
 		else
+			if hover then
+				D.RoundRect(x + 6*k, r.y1 + k, x + w - 6*k, r.y2 - k, 4*k, COLOR.tile)
+			end
 			local option = options[r.key]
-			local on = option.type ~= 'bool' or option.value
-			gl.Color(COLOR.text)
-			gl.Text(option.name, x + 24, r.y1 + 4, 11, "o")
-			gl.Color(on and COLOR.ready or COLOR.muted)
-			gl.Text(OptionText(r.key), x + w - 10, r.y1 + 4, 11, "ro")
+			Text(option.name, x + 24*k, midY, 10.5*k, "vo", COLOR.text)
+			if option.type == 'bool' then
+				-- Toggle switch
+				local sx, sw, sh = x + w - 46*k, 30*k, 14*k
+				local on = option.value
+				D.RoundRect(sx, midY - sh*0.5, sx + sw, midY + sh*0.5, sh*0.5, on and D.Alpha(COLOR.ready, 0.9) or {0.3, 0.3, 0.36, 0.9})
+				local kx = on and (sx + sw - sh*0.5) or (sx + sh*0.5)
+				D.Disc(kx, midY, sh*0.38, 16, {1, 1, 1, 1})
+			else
+				Text(OptionText(r.key), x + w - 14*k, midY, 10*k, "rvo", COLOR.ready)
+			end
 		end
 	end
 	gl.Color(1, 1, 1, 1)
@@ -2587,40 +3222,164 @@ local function MenuClick(mx, my)
 	return true
 end
 
+-- Flight path card: what a straight flight from the selected Magpies to the cursor crosses.
+local PATH_COMMANDS = {[CMD.MOVE or -1] = true, [customCmds.RAW_MOVE or -1] = true, [CMD.ATTACK or -1] = true,
+	[CMD.FIGHT or -1] = true, [CMD.PATROL or -1] = true, [CMD.AREA_ATTACK or -1] = true}
+
+local function SelectedMagpies()
+	local list = {}
+	for i = 1, #view.selected do
+		if magpies[view.selected[i]] then
+			list[#list + 1] = view.selected[i]
+		end
+	end
+	return list
+end
+
+local function UpdatePathView()
+	view.path = nil
+	local mode = Opt('path_card')
+	if mode == 'off' or not Opt('threat_map') then
+		return
+	end
+	if mode == 'command' then
+		local _, cmdID = Spring.GetActiveCommand()
+		if not (cmdID and PATH_COMMANDS[cmdID]) then
+			return
+		end
+	end
+	local list = SelectedMagpies()
+	if #list == 0 then
+		return
+	end
+	local mx, my = Spring.GetMouseState()
+	if widget:IsAbove(mx, my) then
+		return
+	end
+	local gx, gz = GroundAt(mx, my)
+	local sx, sz = Centroid(list)
+	if not (gx and sx) then
+		return
+	end
+	-- Reuse the last result while the ends stay put.
+	local last = view.lastPath
+	if last and math.abs(last.x1 - sx) + math.abs(last.z1 - sz) + math.abs(last.x2 - gx) + math.abs(last.z2 - gz) < 24 and frame - last.frame < 15 then
+		view.path = last
+		return
+	end
+	local info = PathInsight(sx, sz, gx, gz)
+	info.frame = frame
+	info.lines = PathLines(info, list)
+	view.path, view.lastPath = info, info
+end
+
+local function DrawPathCard(below)
+	local info = view.path
+	if not info then
+		return
+	end
+	local mx, my = Spring.GetMouseState()
+	local k = D.UiScale()
+	local texts, colors = {}, {}
+	for i = 2, #info.lines do
+		texts[#texts + 1] = info.lines[i][1]
+		colors[#colors + 1] = info.lines[i][2]
+	end
+	DrawCardAt(mx + 24*k, my - 12*k - (below or 0) - (below and below > 0 and 6*k or 0), "Flight path: " .. info.lines[1][1], nil, texts, k, colors)
+end
+
+local function DrawPathWorld()
+	local info = view.path
+	if not info then
+		return
+	end
+	local function P(f)
+		local x, z = info.x1 + (info.x2 - info.x1)*f, info.z1 + (info.z2 - info.z1)*f
+		return x, (Spring.GetGroundHeight(x, z) or 0) + 24, z
+	end
+	local steps = max(2, ceil(info.length/64))
+	gl.LineWidth(3)
+	gl.Color(1, 1, 1, 0.55)
+	gl.BeginEnd(GL.LINE_STRIP, function()
+		for i = 0, steps do
+			gl.Vertex(P(i/steps))
+		end
+	end)
+	-- Stretches inside anti-air range, coloured by how dangerous each is.
+	gl.LineWidth(5)
+	for i = 1, #info.spans do
+		local span = info.spans[i]
+		gl.Color(1, 0.75 - 0.6*span[3], 0.3, 0.9)
+		local n = max(1, ceil((span[2] - span[1])*steps))
+		gl.BeginEnd(GL.LINE_STRIP, function()
+			for j = 0, n do
+				gl.Vertex(P(span[1] + (span[2] - span[1])*j/n))
+			end
+		end)
+	end
+	gl.LineWidth(1)
+	gl.Color(1, 1, 1, 1)
+end
+
+function widget:SelectionChanged(selected)
+	view.selected = selected or {}
+	view.selSet = {}
+	for i = 1, #view.selected do
+		view.selSet[view.selected[i]] = true
+	end
+end
+
 function widget:DrawScreen()
+	UpdatePathView()
 	if Opt('show_hud') then
 		DrawCylinder()
-	end
-	if Opt('show_card') then
-		DrawCard()
 	end
 	if Opt('show_ledger') then
 		DrawLedger()
 	end
+	local cardH = 0
+	if Opt('show_card') then
+		cardH = DrawCard()
+	end
+	DrawPathCard(cardH)
 	if menuOpen then
 		DrawMenu()
 	end
+	gl.Color(1, 1, 1, 1)
+end
+
+-- Filled threat discs come from the game's ground-volume helper; outlines are the fallback.
+if type(gl.Utilities) ~= "table" or not gl.Utilities.DrawGroundCircle then
+	pcall(VFS.Include, "LuaRules/Utilities/glVolumes.lua")
+end
+
+local function ThreatColour(t)
+	-- Redder the faster it kills a Magpie. Stockpilers: by whether they hold a missile.
+	local danger = max(0, min(1, 1 - t.ttk/15))
+	local stock = StockEstimate(t)
+	if stock then
+		danger = (stock > 0) and 1 or 0.2
+	end
+	return 1, 0.75 - 0.6*danger, 0.3, danger
 end
 
 function widget:DrawWorldPreUnit()
 	if Opt('threat_map') then
-		gl.LineWidth(1.5)
-		for unitID, t in pairs(threats) do
+		local fill = Opt('threat_style') == 'fill' and type(gl.Utilities) == "table" and gl.Utilities.DrawGroundCircle
+		for _, t in pairs(threats) do
 			if not t.fighter then
-				-- Redder the faster it kills a Magpie.
-				local danger = max(0, min(1, 1 - t.ttk/15))
-				local stock = StockEstimate(t)
-				if stock then
-					danger = (stock > 0) and 1 or 0.2
+				local r, g, b, danger = ThreatColour(t)
+				local seen = t.inLos and 1 or 0.55
+				if fill then
+					gl.Color(r, g, b, t.building and 0.05 or (0.08 + 0.12*danger)*seen)
+					gl.Utilities.DrawGroundCircle(t.x, t.z, t.range)
 				end
-				local alpha = t.inLos and 0.55 or 0.25
-				if t.building then
-					alpha = 0.12 -- not a threat yet
-				end
-				gl.Color(1, 0.75 - 0.6*danger, 0.3, alpha)
-				gl.DrawGroundCircle(t.x, t.y, t.z, t.range, 48)
+				gl.LineWidth(t.building and 1 or 2)
+				gl.Color(r, g, b, t.building and 0.2 or (0.35 + 0.35*danger)*seen)
+				gl.DrawGroundCircle(t.x, t.y, t.z, t.range, 64)
 			end
 		end
+		gl.LineWidth(1)
 	end
 	if Opt('stale_intel') then
 		gl.Color(0.55, 0.55, 0.62, 0.35)
@@ -2628,7 +3387,7 @@ function widget:DrawWorldPreUnit()
 			local stale = routeCache[i].stale or {}
 			for j = 1, #stale do
 				local c = stale[j]
-				gl.DrawGroundCircle(c.x, spGetGroundHeight(c.x, c.z) or 0, c.z, LOS_CELL*0.45, 12)
+				gl.DrawGroundCircle(c.x, Spring.GetGroundHeight(c.x, c.z) or 0, c.z, LOS_CELL*0.45, 12)
 			end
 		end
 	end
@@ -2639,29 +3398,39 @@ function widget:DrawWorldPreUnit()
 			-- Green when safe, red when the route alone would kill a Magpie.
 			local danger = max(0, min(1, r.risk/magpieStats.maxHealth))
 			gl.Color(0.3 + 0.7*danger, 0.9 - 0.7*danger, 0.35, 0.8)
-			gl.BeginEnd(GL_LINES, function()
-				gl.Vertex(r.x1, (spGetGroundHeight(r.x1, r.z1) or 0) + 40, r.z1)
+			gl.BeginEnd(GL.LINES, function()
+				gl.Vertex(r.x1, (Spring.GetGroundHeight(r.x1, r.z1) or 0) + 40, r.z1)
 				gl.Vertex(r.x2, r.y + 40, r.z2)
 			end)
 		end
 	end
+	DrawPathWorld()
 	if approachDrag then
 		gl.LineWidth(3)
 		gl.Color(COLOR.ready)
-		gl.BeginEnd(GL_LINES, function()
-			gl.Vertex(approachDrag[1], (spGetGroundHeight(approachDrag[1], approachDrag[2]) or 0) + 20, approachDrag[2])
-			gl.Vertex(approachDrag[3], (spGetGroundHeight(approachDrag[3], approachDrag[4]) or 0) + 20, approachDrag[4])
+		gl.BeginEnd(GL.LINES, function()
+			gl.Vertex(approachDrag[1], (Spring.GetGroundHeight(approachDrag[1], approachDrag[2]) or 0) + 20, approachDrag[2])
+			gl.Vertex(approachDrag[3], (Spring.GetGroundHeight(approachDrag[3], approachDrag[4]) or 0) + 20, approachDrag[4])
 		end)
 	end
+	gl.LineWidth(2)
 	gl.Color(COLOR.attacking)
 	for i = 1, #marks do
-		local x, y, z = spGetUnitPosition(marks[i])
+		local x, y, z = Spring.GetUnitPosition(marks[i])
 		if x then
-			gl.DrawGroundCircle(x, y, z, 60, 20)
+			gl.DrawGroundCircle(x, y, z, 60, 24)
 		end
 	end
 	gl.LineWidth(1)
 	gl.Color(1, 1, 1, 1)
+end
+
+function D.Label(x, y, z, str, size, c)
+	gl.PushMatrix()
+	gl.Translate(x, y, z)
+	gl.Billboard()
+	Text(str, 0, 0, size, "cvo", c)
+	gl.PopMatrix()
 end
 
 function widget:DrawWorld()
@@ -2669,12 +3438,7 @@ function widget:DrawWorld()
 	if Opt('route_lines') then
 		for i = 1, #routeCache do
 			local r = routeCache[i]
-			gl.PushMatrix()
-			gl.Translate((r.x1 + r.x2)*0.5, (r.y or 0) + 60, (r.z1 + r.z2)*0.5)
-			gl.Billboard()
-			gl.Color(COLOR.text)
-			gl.Text(string.format("%s risk %d", r.label, floor(r.risk)), 0, 0, 12, "cv")
-			gl.PopMatrix()
+			D.Label((r.x1 + r.x2)*0.5, (r.y or 0) + 60, (r.z1 + r.z2)*0.5, string.format("%s risk %d", r.label, floor(r.risk)), 12, COLOR.text)
 		end
 	end
 	for w = 1, Opt('wing_labels') and WING_COUNT or 0 do
@@ -2688,37 +3452,21 @@ function widget:DrawWorld()
 		if #list > 0 then
 			local cx, cz = Centroid(list)
 			if cx then
-				local cy = (spGetGroundHeight(cx, cz) or 0) + 220
-				gl.PushMatrix()
-				gl.Translate(cx, cy, cz)
-				gl.Billboard()
-				gl.Color(COLOR.ready)
-				gl.Text(WING_LETTER[w] .. " " .. #list, 0, 0, 18, "cv")
-				gl.PopMatrix()
+				D.Label(cx, (Spring.GetGroundHeight(cx, cz) or 0) + 220, cz, WING_LETTER[w] .. " " .. #list, 18, COLOR.ready)
 			end
 		end
 	end
 	for i = 1, #marks do
-		local x, y, z = spGetUnitPosition(marks[i])
+		local x, y, z = Spring.GetUnitPosition(marks[i])
 		if x then
-			gl.PushMatrix()
-			gl.Translate(x, y + 80, z)
-			gl.Billboard()
-			gl.Color(COLOR.attacking)
-			gl.Text(tostring(i), 0, 0, 20, "cv")
-			gl.PopMatrix()
+			D.Label(x, y + 80, z, tostring(i), 20, COLOR.attacking)
 		end
 	end
 	if Opt('threat_map') and Opt('stockpile_watch') then
 		for _, t in pairs(threats) do
 			local text = ThreatLabel(t)
 			if text then
-				gl.PushMatrix()
-				gl.Translate(t.x, t.y + 120, t.z)
-				gl.Billboard()
-				gl.Color(t.building and COLOR.muted or COLOR.returning)
-				gl.Text(text, 0, 0, 14, "cv")
-				gl.PopMatrix()
+				D.Label(t.x, t.y + 120, t.z, text, 14, t.building and COLOR.muted or COLOR.returning)
 			end
 		end
 	end
@@ -2729,12 +3477,7 @@ function widget:DrawWorld()
 			if def and def.reload then
 				local left = def.reload - (frame - fired)/30
 				if left > 0 then
-					gl.PushMatrix()
-					gl.Translate(t.x, t.y + 90, t.z)
-					gl.Billboard()
-					gl.Color(COLOR.ready)
-					gl.Text(string.format("reload %.0fs", left), 0, 0, 14, "cv")
-					gl.PopMatrix()
+					D.Label(t.x, t.y + 90, t.z, string.format("reload %.0fs", left), 14, COLOR.ready)
 				else
 					reloadSeen[unitID] = nil
 				end
@@ -2752,6 +3495,14 @@ local function LedgerHit(x, y)
 	return x >= lx and x <= lx + lw and y <= ly and y >= ly - lh
 end
 
+local function HudHit(x, y)
+	if not Opt('show_hud') then
+		return false
+	end
+	local _, _, cx, cy = ChamberCentre(1)
+	return Dist2D(x, y, cx, cy) <= hud.radius
+end
+
 function widget:IsAbove(x, y)
 	if menuOpen then
 		local _, mx, top, w, h = MenuLayout()
@@ -2762,28 +3513,32 @@ function widget:IsAbove(x, y)
 	if LedgerHit(x, y) then
 		return true
 	end
-	if not Opt('show_hud') then
-		return false
+	local over = HudHit(x, y)
+	if over then
+		local _, _, cx, cy = ChamberCentre(1)
+		view.hoverHub = Dist2D(x, y, cx, cy) <= hud.hub
+	else
+		view.hoverHub = false
 	end
-	local _, _, cx, cy = ChamberCentre(1)
-	return Dist2D(x, y, cx, cy) <= hud.radius
+	return over
 end
 
 local function HudClick(x, y)
 	local _, _, cx, cy = ChamberCentre(1)
-	if Dist2D(x, y, cx, cy) <= 16 then
+	if Dist2D(x, y, cx, cy) <= hud.hub then
 		ToggleMenu()
 		return
 	end
 	for w = 1, WING_COUNT do
 		local chx, chy = ChamberCentre(w)
-		if Dist2D(x, y, chx, chy) <= hud.chamber then
-			local list = SelectWing(w)
+		if Dist2D(x, y, chx, chy) <= hud.chamber*1.1 then
+			local _, ctrl, _, shift = Spring.GetModKeyState()
+			local list = SelectWing(w, shift or ctrl)
 			local now = frame
 			if lastClick.wing == w and now - lastClick.time < 12 then
 				local wx, wz = Centroid(list)
 				if wx then
-					Spring.SetCameraTarget(wx, spGetGroundHeight(wx, wz) or 0, wz)
+					Spring.SetCameraTarget(wx, Spring.GetGroundHeight(wx, wz) or 0, wz)
 				end
 			end
 			lastClick.wing, lastClick.time = w, now
@@ -2792,8 +3547,8 @@ local function HudClick(x, y)
 	end
 end
 
-local function GroundAt(x, y)
-	local kind, pos = spTraceScreenRay(x, y, true)
+function GroundAt(x, y)
+	local kind, pos = Spring.TraceScreenRay(x, y, true)
 	if kind == "ground" and pos then
 		return pos[1], pos[3]
 	end
@@ -2822,16 +3577,16 @@ function widget:MousePress(x, y, button)
 	end
 	-- Press on a panel: a drag moves it, a click (no drag) acts on release.
 	if LedgerHit(x, y) then
-		local _, ly = LedgerRect()
+		local _, ly, _, _, k = LedgerRect()
 		dragging = {what = ledgerPanel, x0 = x, y0 = y, fx0 = ledgerPanel.fx, fy0 = ledgerPanel.fy,
 			onClick = function()
-				if y >= ly - 24 then
+				if y >= ly - 26*k then
 					SetOption('ledger_view', NextOptionValue('ledger_view'))
 				end
 			end}
 		return true
 	end
-	if not (Opt('show_hud') and widget:IsAbove(x, y)) then
+	if not HudHit(x, y) then
 		return false
 	end
 	dragging = {what = hud, x0 = x, y0 = y, fx0 = hud.fx, fy0 = hud.fy, onClick = function() HudClick(x, y) end}
@@ -2884,23 +3639,50 @@ function widget:MouseRelease(x, y, button)
 	return true
 end
 
+-- Mouse wheel over a panel resizes it.
+function widget:MouseWheel(up, value)
+	local x, y = Spring.GetMouseState()
+	local key
+	if LedgerHit(x, y) then
+		key = 'ledger_size'
+	elseif HudHit(x, y) then
+		key = 'hud_size'
+	else
+		return false
+	end
+	local option = options[key]
+	SetOption(key, max(option.min, min(option.max, option.value + (up and option.step or -option.step))))
+	return true
+end
+
 function widget:GetTooltip(x, y)
 	for w = 1, WING_COUNT do
 		local chx, chy = ChamberCentre(w)
-		if Dist2D(x, y, chx, chy) <= hud.chamber then
+		if Dist2D(x, y, chx, chy) <= hud.chamber*1.1 then
 			local s = WingSummary(w)
-			return string.format("Wing %s: %d Magpies, %d ready, ammo %d%%, health %d%%. Click to select, double-click to view.",
+			local text = string.format("Wing %s: %d Magpies, %d ready, ammo %d%%, health %d%%.",
 				WING_LETTER[w], s.n, s.ready, floor(s.ammo*100), floor(s.health*100))
+			local eta, parts = WingETA(w)
+			if eta > 0 and parts then
+				text = text .. string.format("\nReady in %ds: flight %ds, pad queue %ds, rearm %ds, repair %ds.",
+					ceil(eta), ceil(parts.flight), ceil(parts.wait), ceil(parts.rearm), ceil(parts.repair))
+			end
+			return text .. "\nClick to select, Shift-click to add, double-click to view. Drag to move, wheel to resize."
 		end
 	end
 	if menuOpen then
 		return "Click a feature to switch it on or off."
 	end
-	return "Revolver. Click the middle for the feature menu."
+	if LedgerHit(x, y) then
+		return "Revolver ledger. Click the title bar to switch views. Drag to move, wheel to resize."
+	end
+	return "Revolver. Click the middle for the feature menu. Drag to move, wheel to resize."
 end
 
 widget.RevolverMenuLayout = MenuLayout
 widget.RevolverLedgerRect = LedgerRect
+widget.RevolverChamberCentre = ChamberCentre
+widget.RevolverPath = function() UpdatePathView() return view.path end
 
 end -- Drawing
 
@@ -2919,6 +3701,8 @@ widget.RevolverInternals = {
 	totals = function() return totals end,
 	history = function() return history end,
 	reloadSeen = function() return reloadSeen end,
+	struck = function() return struck end,
+	PathInsight = PathInsight, PathLines = PathLines, PadQueue = PadQueue,
 	alerts = function() return alerts end,
 	calibration = function() return calibration end,
 	approach = function() return approachPoint end,
