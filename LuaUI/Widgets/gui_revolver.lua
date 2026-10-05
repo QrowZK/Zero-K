@@ -1592,40 +1592,33 @@ local function OrderAttack(group)
 	group.phase = "attack"
 end
 
--- Send Magpies home. The pad gadget refuses rearm orders from Magpies with full ammo and health
--- (a wing whose target died before it fired), so those fly back over a pad and stay chambered.
+-- Send Magpies to a pad to land. The pad gadget refuses an unshifted REARM from a Magpie with full ammo
+-- and health (a wing whose target died before it fired), but accepts a shift-queued one from any plane,
+-- so the queue is cleared with STOP and REARM is queued behind it. Magpies already landing or headed
+-- to a pad (noammo set) are left to the gadget.
 local function SendHome(list)
-	local full = {}
+	local sent, stranded = 0, 0
 	for i = 1, #list do
 		local unitID = list[i]
-		local ammo, noAmmo = ReadAmmo(unitID)
-		local health, maxHealth = Spring.GetUnitHealth(unitID)
-		local padID = next(pads) and ChoosePad(unitID)
-		local mag = magpies[unitID]
-		if noAmmo ~= 0 or ammo < 1 or (health and maxHealth and health <= maxHealth - 1) then
+		local _, noAmmo = ReadAmmo(unitID)
+		if noAmmo == 0 then
+			local padID = next(pads) and ChoosePad(unitID)
 			if padID then
-				if mag then
-					mag.pad = padID
+				if magpies[unitID] then
+					magpies[unitID].pad = padID
 				end
-				Spring.GiveOrderToUnit(unitID, C.REARM, {padID}, 0)
+				Spring.GiveOrderToUnit(unitID, CMD.STOP, {}, 0)
+				Spring.GiveOrderToUnit(unitID, C.REARM, {padID}, C.OPT_SHIFT)
+				sent = sent + 1
 			else
-				Spring.GiveOrderToUnit(unitID, C.FIND_PAD, {}, 0)
-			end
-		else
-			local px, py, pz
-			if padID then
-				px, py, pz = Spring.GetUnitPosition(padID)
-			end
-			if px then
-				Spring.GiveOrderToUnit(unitID, C.MOVE, {px, py, pz}, 0)
-			else
-				full[#full + 1] = unitID
+				stranded = stranded + 1
 			end
 		end
 	end
-	if #full > 0 then
-		Spring.GiveOrderToUnitArray(full, CMD.STOP, {}, 0)
+	if stranded > 0 then
+		Alert(stranded .. " Magpies have no pad to land on.", "nopad")
 	end
+	return sent
 end
 
 local function ReleaseGroup(group, home)
@@ -1641,7 +1634,10 @@ local function ReleaseGroup(group, home)
 		end
 	end
 	if home and #list > 0 then
-		SendHome(list)
+		local sent = SendHome(list)
+		if sent > 0 then
+			Alert("Wing " .. (WING_LETTER[group.wing] or "?") .. ": " .. sent .. " Magpies heading to pads.")
+		end
 	end
 	groups[group.id] = nil
 end
