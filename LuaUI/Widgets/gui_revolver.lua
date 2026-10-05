@@ -7,6 +7,7 @@ function widget:GetInfo()
 		desc      = "Fleet manager for Magpies. Groups them into six wings, shows how many each target needs, keeps shots for ordered targets, balances pads, maps enemy anti-air and records every sortie.",
 		author    = "QrowZK",
 		date      = "October 2026",
+		version   = "2026-10-05e",
 		license   = "GNU GPL, v2 or later",
 		layer     = 10,
 		enabled   = false,
@@ -30,6 +31,7 @@ local C = {
 	LOOP_ATTACK = customCmds.LOOP_ATTACK, SET_TARGET = customCmds.UNIT_SET_TARGET,
 	HOLD = 0, FREE = 2,
 }
+C.killHome = {} -- Magpies whose hand-ordered target just died, sent home after this poll
 
 local defs = VFS.Include("LuaUI/Configs/revolver_defs.lua")
 
@@ -1675,7 +1677,7 @@ local function ReleaseGroup(group, home)
 	if home and #list > 0 then
 		local sent = SendHome(list)
 		if sent > 0 then
-			Alert("Wing " .. (WING_LETTER[group.wing] or "?") .. ": " .. sent .. " Magpies heading to pads.")
+			Alert("Wing " .. (WING_LETTER[group.wing] or "?") .. ": " .. (group.target and not IsAliveEnemy(group.target) and "target down, " or "") .. sent .. " Magpies heading to pads.")
 		end
 	end
 	groups[group.id] = nil
@@ -2089,6 +2091,21 @@ local function UpdateMagpie(unitID, mag)
 		end
 	end
 
+	-- Attacks ordered by hand (not through Fire): remember which unit the Magpie is attacking. When it
+	-- is left with nothing to do and that unit is dead, the target was killed: kill confirm sends it home.
+	if not mag.group and noAmmo == 0 then
+		local cmdID, _, _, p1, p2 = Spring.GetUnitCurrentCommand(unitID)
+		if cmdID == C.ATTACK and p1 and not p2 then
+			mag.handTarget = p1
+		elseif cmdID then
+			mag.handTarget = nil
+		elseif mag.handTarget then
+			if not IsAliveEnemy(mag.handTarget) and Opt('kill_confirm') ~= 'off' then
+				C.killHome[#C.killHome + 1] = unitID
+			end
+			mag.handTarget = nil
+		end
+	end
 	if mag.homeFrame then
 		C.CheckHome(unitID, mag)
 	end
@@ -2427,6 +2444,15 @@ function widget:GameFrame(n)
 			end
 			UpdateMagpie(unitID, mag)
 		end
+		if #C.killHome > 0 then
+			local list = C.killHome
+			C.killHome = {}
+			local sent = SendHome(list)
+			if sent > 0 then
+				local w = magpies[list[1]] and magpies[list[1]].wing
+				Alert((w and ("Wing " .. WING_LETTER[w] .. ": ") or "") .. "target down, " .. sent .. " Magpies heading to pads.")
+			end
+		end
 		if track then
 			UpdateStruck()
 		end
@@ -2540,6 +2566,7 @@ function widget:Initialize()
 	if CheckSpec() then
 		return
 	end
+	Spring.Echo("Revolver: build " .. ((widget.GetInfo and widget:GetInfo().version) or "?") .. " loaded.")
 	myTeamID = Spring.GetMyTeamID()
 	myAllyTeamID = Spring.GetMyAllyTeamID()
 	frame = Spring.GetGameFrame()
