@@ -18,36 +18,23 @@ end
 --------------------------------------------------------------------------------
 -- Speedups
 
-local spGetMyTeamID            = Spring.GetMyTeamID
-local spGetMyAllyTeamID        = Spring.GetMyAllyTeamID
-local spGetTeamUnits           = Spring.GetTeamUnits
 local spGetUnitDefID           = Spring.GetUnitDefID
-local spGetUnitTeam            = Spring.GetUnitTeam
 local spGetUnitAllyTeam        = Spring.GetUnitAllyTeam
 local spGetUnitHealth          = Spring.GetUnitHealth
 local spGetUnitPosition        = Spring.GetUnitPosition
 local spGetUnitRulesParam      = Spring.GetUnitRulesParam
 local spGetUnitCurrentCommand  = Spring.GetUnitCurrentCommand
 local spGetUnitStates          = Spring.GetUnitStates
-local spGetUnitArmored         = Spring.GetUnitArmored
 local spGetUnitIsDead          = Spring.GetUnitIsDead
 local spValidUnitID            = Spring.ValidUnitID
 local spGiveOrderToUnitArray   = Spring.GiveOrderToUnitArray
 local spGiveOrderToUnit        = Spring.GiveOrderToUnit
-local spGetGameFrame           = Spring.GetGameFrame
 local spGetMouseState          = Spring.GetMouseState
 local spTraceScreenRay         = Spring.TraceScreenRay
 local spIsPosInLos             = Spring.IsPosInLos
 local spGetGroundHeight        = Spring.GetGroundHeight
-local spSelectUnitArray        = Spring.SelectUnitArray
-local spSetCameraTarget        = Spring.SetCameraTarget
-local spGetViewGeometry        = Spring.GetViewGeometry
-local spPlaySoundFile          = Spring.PlaySoundFile
-local spEcho                   = Spring.Echo
-local spFindUnitCmdDesc        = Spring.FindUnitCmdDesc
-local spGetUnitCmdDescs        = Spring.GetUnitCmdDescs
 
-local floor, ceil, sqrt, min, max, abs = math.floor, math.ceil, math.sqrt, math.min, math.max, math.abs
+local floor, ceil, sqrt, min, max = math.floor, math.ceil, math.sqrt, math.min, math.max
 local pi, cos, sin = math.pi, math.cos, math.sin
 
 local CMD_ATTACK      = CMD.ATTACK
@@ -171,56 +158,65 @@ local hud = {x = 160, y = 220, radius = 92, chamber = 30}
 local ledgerPanel = {x = 20, y = 260, w = 380, h = 220}
 
 local Fire, Mark, ClearMarks, Recall, SelectWing, SelectReady, SetApproach, PoolPartial, ToggleCalibration
+local ToggleMenu, AssignSelected
 
-options_path = 'Settings/Unit Behaviour/Revolver'
+local ROOT = 'Settings/Unit Behaviour/Revolver'
+local PATH = {
+	cylinder = ROOT .. '/Cylinder',
+	reload   = ROOT .. '/Reload',
+	sights   = ROOT .. '/Sights',
+	trigger  = ROOT .. '/Trigger',
+	radar    = ROOT .. '/Radar',
+	ledger   = ROOT .. '/Ledger',
+	grip     = ROOT .. '/Grip',
+}
+
+local function Switch(name, desc, value, path)
+	return {name = name, desc = desc, type = 'bool', value = value, path = path, noHotkey = true}
+end
+
+options_path = ROOT
 options_order = {
-	'wing_size', 'assign_mode', 'ready_ammo', 'ready_health', 'spare_wing',
-	'horizon', 'auto_style', 'hold_fire', 'release_near_target', 'time_on_target', 'staging_distance',
-	'kill_confirm', 'slow_chain', 'rotate_fire',
+	-- Cylinder
+	'auto_wing', 'wing_size', 'assign_mode', 'ready_ammo', 'ready_health', 'spare_wing', 'show_hud', 'wing_labels', 'fleet_advisor',
+	-- Reload
 	'pad_balance', 'retreat_state',
-	'threat_map', 'fighter_alert', 'fighter_pullback', 'reload_tracking', 'sounds',
-	'show_hud', 'show_card', 'show_ledger', 'export_csv',
-	'fire', 'mark', 'clear_marks', 'recall', 'select_ready',
+	-- Sights
+	'show_card', 'live_correction', 'allocate', 'horizon', 'auto_style', 'slow_chain', 'kill_confirm',
+	-- Trigger
+	'hold_fire', 'release_near_target', 'time_on_target', 'staging_distance', 'rotate_fire',
+	-- Radar
+	'threat_map', 'route_lines', 'stale_intel', 'stale_seconds', 'route_alert', 'fighter_alert', 'fighter_pullback', 'reload_tracking',
+	-- Ledger
+	'ledger_tracking', 'show_ledger', 'ledger_view', 'career_history', 'export_csv',
+	-- Grip
+	'sounds', 'open_menu', 'fire', 'mark', 'clear_marks', 'recall', 'select_ready',
 	'select_1', 'select_2', 'select_3', 'select_4', 'select_5', 'select_6',
+	'assign_1', 'assign_2', 'assign_3', 'assign_4', 'assign_5', 'assign_6',
 	'approach', 'pool', 'calibrate',
 }
 options = {
-	wing_size = {name = 'Wing size', desc = 'Most Magpies in one wing. Extra Magpies go to the next wing.', type = 'number', value = 12, min = 1, max = 40, step = 1},
+	-- Cylinder
+	auto_wing = Switch('Put new Magpies in wings', 'New Magpies join a wing as they leave the plant. Off: assign them yourself with the Assign keys.', true, PATH.cylinder),
+	wing_size = {name = 'Wing size', desc = 'Most Magpies in one wing. Extra Magpies go to the next wing.', type = 'number', value = 12, min = 1, max = 40, step = 1, path = PATH.cylinder},
 	assign_mode = {
-		name = 'New Magpies join', type = 'radioButton', value = 'fill',
+		name = 'New Magpies join', type = 'radioButton', value = 'fill', path = PATH.cylinder,
 		items = {
 			{key = 'fill', name = 'Fill one wing at a time'},
 			{key = 'round', name = 'Wings in turn'},
 		},
 	},
-	ready_ammo = {name = 'Ready at ammo (%)', desc = 'A wing is chambered when its average ammo reaches this.', type = 'number', value = 90, min = 10, max = 100, step = 5},
-	ready_health = {name = 'Ready at health (%)', desc = 'A wing is chambered when its average health reaches this.', type = 'number', value = 70, min = 10, max = 100, step = 5},
-	spare_wing = {name = 'Use wing F as the spare wing', desc = 'Half-empty Magpies are gathered into wing F so full wings stay chambered.', type = 'bool', value = false},
-	horizon = {
-		name = 'Kill within', desc = 'How fast a target should die. Sets how many Magpies Fire sends.', type = 'radioButton', value = '2',
-		items = {
-			{key = '1', name = '1 pass'}, {key = '2', name = '2 passes'}, {key = '3', name = '3 passes'},
-			{key = '5', name = '5 passes'}, {key = '99', name = 'One sortie'},
-		},
-	},
-	auto_style = {name = 'Pick Strafe or Loopback per target', type = 'bool', value = true},
-	hold_fire = {name = 'Hold fire until the target', desc = 'Launched Magpies hold fire so they only shoot their ordered target.', type = 'bool', value = true},
-	release_near_target = {name = 'Free fire near the target', desc = 'Within weapon range of the target, Magpies may also shoot units next to it.', type = 'bool', value = false},
-	time_on_target = {name = 'Arrive together', desc = 'Wings gather at a staging point before the attack so they arrive at the same time.', type = 'bool', value = true},
-	staging_distance = {name = 'Staging distance', type = 'number', value = 1300, min = 700, max = 2500, step = 50},
-	kill_confirm = {
-		name = 'When a target dies early', type = 'radioButton', value = 'next',
-		items = {
-			{key = 'next', name = 'Next marked target, else home'},
-			{key = 'home', name = 'Go home'},
-			{key = 'off', name = 'Do nothing'},
-		},
-	},
-	slow_chain = {name = 'Slow chain', desc = 'When a target reaches 50% slow, extra Magpies move to the next marked target.', type = 'bool', value = true},
-	rotate_fire = {name = 'Rotate fire', desc = 'When a wing runs dry, the next chambered wing launches at the same targets.', type = 'bool', value = false},
-	pad_balance = {name = 'Balance pads', desc = 'Send returning Magpies to the pad with the shortest wait.', type = 'bool', value = true},
+	ready_ammo = {name = 'Ready at ammo (%)', desc = 'A wing is chambered when its average ammo reaches this.', type = 'number', value = 90, min = 10, max = 100, step = 5, path = PATH.cylinder},
+	ready_health = {name = 'Ready at health (%)', desc = 'A wing is chambered when its average health reaches this.', type = 'number', value = 70, min = 10, max = 100, step = 5, path = PATH.cylinder},
+	spare_wing = Switch('Use wing F as the spare wing', 'Half-empty Magpies are gathered into wing F so full wings stay chambered.', false, PATH.cylinder),
+	show_hud = Switch('Show cylinder', nil, true, PATH.cylinder),
+	wing_labels = Switch('Wing labels over Magpies', nil, true, PATH.cylinder),
+	fleet_advisor = Switch('Fleet and pad advisor', 'Pad slots against what the fleet needs, under the cylinder and in the ledger.', true, PATH.cylinder),
+
+	-- Reload
+	pad_balance = Switch('Balance pads', 'Send returning Magpies to the pad with the shortest wait.', true, PATH.reload),
 	retreat_state = {
-		name = 'Retreat setting for wings', type = 'radioButton', value = 'keep',
+		name = 'Damage triage (retreat setting for wings)', type = 'radioButton', value = 'keep', path = PATH.reload,
 		items = {
 			{key = 'keep', name = 'Leave as is'},
 			{key = '1', name = 'Retreat at 30%'},
@@ -228,30 +224,86 @@ options = {
 			{key = '3', name = 'Retreat at 99%'},
 		},
 	},
-	threat_map = {name = 'Show anti-air threat map', type = 'bool', value = true},
-	fighter_alert = {name = 'Fighter alerts', type = 'bool', value = true},
-	fighter_pullback = {name = 'Pull wings back from fighters', type = 'bool', value = false},
-	reload_tracking = {name = 'Track long AA reloads', desc = 'Shows when a Hacksaw or other long-reload AA that shot your Magpies is reloading.', type = 'bool', value = true},
-	sounds = {name = 'Sounds', type = 'bool', value = true},
-	show_hud = {name = 'Show cylinder', type = 'bool', value = true},
-	show_card = {name = 'Show breakpoint card on hover', type = 'bool', value = true},
-	show_ledger = {name = 'Show ledger', type = 'bool', value = false},
-	export_csv = {name = 'Save sorties to file', desc = 'Writes LuaUI/Config/Revolver/*.csv at the end of the game.', type = 'bool', value = true},
 
-	fire = {name = 'Fire', desc = 'Send chambered Magpies at the marked targets, or the enemy under the cursor.', type = 'button', OnChange = function() Fire() end},
-	mark = {name = 'Mark target', desc = 'Add the enemy under the cursor to the target list.', type = 'button', OnChange = function() Mark() end},
-	clear_marks = {name = 'Clear marks', type = 'button', OnChange = function() ClearMarks() end},
-	recall = {name = 'Recall selected', desc = 'Send the selected Magpies, or every airborne wing if none are selected, to pads.', type = 'button', OnChange = function() Recall() end},
-	select_ready = {name = 'Select chambered wings', type = 'button', OnChange = function() SelectReady() end},
-	select_1 = {name = 'Select wing A', type = 'button', OnChange = function() SelectWing(1) end},
-	select_2 = {name = 'Select wing B', type = 'button', OnChange = function() SelectWing(2) end},
-	select_3 = {name = 'Select wing C', type = 'button', OnChange = function() SelectWing(3) end},
-	select_4 = {name = 'Select wing D', type = 'button', OnChange = function() SelectWing(4) end},
-	select_5 = {name = 'Select wing E', type = 'button', OnChange = function() SelectWing(5) end},
-	select_6 = {name = 'Select wing F', type = 'button', OnChange = function() SelectWing(6) end},
-	approach = {name = 'Approach from cursor', desc = 'The next Fire approaches from the direction of the cursor.', type = 'button', OnChange = function() SetApproach() end},
-	pool = {name = 'Pool half-empty Magpies', type = 'button', OnChange = function() PoolPartial() end},
-	calibrate = {name = 'Calibration mode (single player)', desc = 'Keeps sending chambered wings at the enemy under the cursor and compares measured hit rates with the Magpie Manual.', type = 'button', OnChange = function() ToggleCalibration() end},
+	-- Sights
+	show_card = Switch('Breakpoint card on hover', nil, true, PATH.sights),
+	live_correction = Switch('Correct for health and armour', 'Scale breakpoints by the target\'s current health and closed armour.', true, PATH.sights),
+	allocate = Switch('Split wings across targets', 'Off: Fire sends one whole chambered wing per target.', true, PATH.sights),
+	horizon = {
+		name = 'Kill within', desc = 'How fast a target should die. Sets how many Magpies Fire sends.', type = 'radioButton', value = '2', path = PATH.sights,
+		items = {
+			{key = '1', name = '1 pass'}, {key = '2', name = '2 passes'}, {key = '3', name = '3 passes'},
+			{key = '5', name = '5 passes'}, {key = '99', name = 'One sortie'},
+		},
+	},
+	auto_style = Switch('Pick Strafe or Loopback per target', nil, true, PATH.sights),
+	slow_chain = Switch('Slow chain', 'When a target reaches 50% slow, extra Magpies move to the next marked target.', true, PATH.sights),
+	kill_confirm = {
+		name = 'When a target dies early', type = 'radioButton', value = 'next', path = PATH.sights,
+		items = {
+			{key = 'next', name = 'Next marked target, else home'},
+			{key = 'home', name = 'Go home'},
+			{key = 'off', name = 'Do nothing'},
+		},
+	},
+
+	-- Trigger
+	hold_fire = Switch('Hold fire until the target', 'Launched Magpies hold fire so they only shoot their ordered target.', true, PATH.trigger),
+	release_near_target = Switch('Free fire near the target', 'Within weapon range of the target, Magpies may also shoot units next to it.', false, PATH.trigger),
+	time_on_target = Switch('Arrive together', 'Wings gather at a staging point before the attack so they arrive at the same time.', true, PATH.trigger),
+	staging_distance = {name = 'Staging distance', type = 'number', value = 1300, min = 700, max = 2500, step = 50, path = PATH.trigger},
+	rotate_fire = Switch('Rotate fire', 'When a wing runs dry, the next chambered wing launches at the same targets.', false, PATH.trigger),
+
+	-- Radar
+	threat_map = Switch('Anti-air threat map', nil, true, PATH.radar),
+	route_lines = Switch('Route lines with risk', 'Lines from wings to their targets, coloured by expected damage per Magpie.', true, PATH.radar),
+	stale_intel = Switch('Shade unseen areas on routes', 'Shades parts of a route nobody on your team has seen recently.', true, PATH.radar),
+	stale_seconds = {name = 'Unseen after (s)', type = 'number', value = 60, min = 10, max = 300, step = 10, path = PATH.radar},
+	route_alert = Switch('Alert on new AA along a route', nil, true, PATH.radar),
+	fighter_alert = Switch('Fighter alerts', nil, true, PATH.radar),
+	fighter_pullback = Switch('Pull wings back from fighters', nil, false, PATH.radar),
+	reload_tracking = Switch('Track long AA reloads', 'Shows when a Hacksaw or other long-reload AA that shot your Magpies is reloading.', true, PATH.radar),
+
+	-- Ledger
+	ledger_tracking = Switch('Record sorties', nil, true, PATH.ledger),
+	show_ledger = Switch('Show ledger', nil, false, PATH.ledger),
+	ledger_view = {
+		name = 'Ledger graph', type = 'radioButton', value = 'runs', path = PATH.ledger,
+		items = {
+			{key = 'runs', name = 'Hit factor per run'},
+			{key = 'targets', name = 'Hit factor per target type'},
+		},
+	},
+	career_history = Switch('Career history', 'Keep a summary of every game and show the trend.', true, PATH.ledger),
+	export_csv = Switch('Save sorties to file', 'Writes LuaUI/Config/Revolver/*.csv at the end of the game.', true, PATH.ledger),
+
+	-- Grip
+	sounds = Switch('Sounds', nil, true, PATH.grip),
+	open_menu = {name = 'Open Revolver menu', desc = 'Switch Revolver features on and off. Also opens from the middle of the cylinder.', type = 'button', path = PATH.grip, OnChange = function() ToggleMenu() end},
+	fire = {name = 'Fire', desc = 'Send chambered Magpies at the marked targets, or the enemy under the cursor.', type = 'button', path = PATH.grip, OnChange = function() Fire() end},
+	mark = {name = 'Mark target', desc = 'Add the enemy under the cursor to the target list.', type = 'button', path = PATH.grip, OnChange = function() Mark() end},
+	clear_marks = {name = 'Clear marks', type = 'button', path = PATH.grip, OnChange = function() ClearMarks() end},
+	recall = {name = 'Recall selected', desc = 'Send the selected Magpies, or every airborne wing if none are selected, to pads.', type = 'button', path = PATH.grip, OnChange = function() Recall() end},
+	select_ready = {name = 'Select chambered wings', type = 'button', path = PATH.grip, OnChange = function() SelectReady() end},
+	approach = {name = 'Set approach', desc = 'Then drag on the map in the direction the next attack should fly, or click where it should come from.', type = 'button', path = PATH.grip, OnChange = function() SetApproach() end},
+	pool = {name = 'Pool half-empty Magpies', type = 'button', path = PATH.grip, OnChange = function() PoolPartial() end},
+	calibrate = {name = 'Calibration mode (single player)', desc = 'Keeps sending chambered wings at the enemy under the cursor and compares measured hit rates with the Magpie Manual.', type = 'button', path = PATH.grip, OnChange = function() ToggleCalibration() end},
+}
+for w = 1, 6 do
+	local letter = string.char(64 + w)
+	options['select_' .. w] = {name = 'Select wing ' .. letter, type = 'button', path = PATH.grip, OnChange = function() SelectWing(w) end}
+	options['assign_' .. w] = {name = 'Assign selected to wing ' .. letter, type = 'button', path = PATH.grip, OnChange = function() AssignSelected(w) end}
+end
+
+-- What the in-game menu lists, by module.
+local MENU = {
+	{title = 'Cylinder', keys = {'auto_wing', 'assign_mode', 'spare_wing', 'show_hud', 'wing_labels', 'fleet_advisor'}},
+	{title = 'Reload', keys = {'pad_balance', 'retreat_state'}},
+	{title = 'Sights', keys = {'show_card', 'live_correction', 'allocate', 'horizon', 'auto_style', 'slow_chain', 'kill_confirm'}},
+	{title = 'Trigger', keys = {'hold_fire', 'release_near_target', 'time_on_target', 'rotate_fire'}},
+	{title = 'Radar', keys = {'threat_map', 'route_lines', 'stale_intel', 'route_alert', 'fighter_alert', 'fighter_pullback', 'reload_tracking'}},
+	{title = 'Ledger', keys = {'ledger_tracking', 'show_ledger', 'ledger_view', 'career_history', 'export_csv'}},
+	{title = 'Grip', keys = {'sounds'}},
 }
 
 local function Opt(name)
@@ -278,7 +330,13 @@ local reloadSeen = {}  -- enemy unitID -> frame its long-reload weapon fired at 
 local alerts = {}      -- {text, frame}
 local alertCooldown = {}
 local totals = {metalKilled = 0, metalLost = 0, rearms = 0, repairEnergy = 0, rearmEnergy = 0}
-local approachPoint
+local approachPoint    -- {x, z} to come from, or {dx, dz} flight direction
+local approachMode = false
+local approachDrag
+local menuOpen = false
+local losMemory = {}   -- grid cell -> last frame the team saw it
+local losSweep = 0
+local LOS_CELL = 256
 local calibration
 local history = {}
 local nextGroupID = 1
@@ -342,9 +400,9 @@ local function Alert(text, key, sound)
 	if #alerts > 6 then
 		table.remove(alerts, 1)
 	end
-	spEcho("Revolver: " .. text)
+	Spring.Echo("Revolver: " .. text)
 	if sound and Opt('sounds') then
-		spPlaySoundFile(sound, 1, "ui")
+		Spring.PlaySoundFile(sound, 1, "ui")
 	end
 end
 
@@ -500,7 +558,9 @@ local function AddMagpie(unitID)
 		noAmmo = noAmmo,
 		state = "idle",
 	}
-	AddToWing(unitID, PickWing())
+	if Opt('auto_wing') then
+		AddToWing(unitID, PickWing())
+	end
 end
 
 local function RemoveMagpie(unitID, died)
@@ -576,8 +636,11 @@ local function Need(targetID, mode, horizon)
 	maxHealth = maxHealth or ud.health
 	local hpFrac = max(0.05, health/max(1, maxHealth))
 	local armour = 1
-	if spGetUnitArmored then
-		local armored, multiple = spGetUnitArmored(targetID)
+	if not Opt('live_correction') then
+		hpFrac = 1
+		health = maxHealth
+	elseif Spring.GetUnitArmored then
+		local armored, multiple = Spring.GetUnitArmored(targetID)
 		if armored then
 			armour = multiple or defs.closedArmourFactor
 		end
@@ -671,6 +734,58 @@ local function DistToSegment(px, pz, x1, z1, x2, z2)
 		f = max(0, min(1, ((px - x1)*dx + (pz - z1)*dz)/len2))
 	end
 	return Dist2D(px, pz, x1 + dx*f, z1 + dz*f)
+end
+
+-- Line-of-sight memory: when the team last saw each map cell.
+local function CellKey(x, z)
+	return floor(x/LOS_CELL) .. ":" .. floor(z/LOS_CELL)
+end
+
+local function CellAge(x, z)
+	if spIsPosInLos(x, spGetGroundHeight(x, z) or 0, z, myAllyTeamID) then
+		losMemory[CellKey(x, z)] = frame
+		return 0
+	end
+	local seen = losMemory[CellKey(x, z)]
+	return seen and (frame - seen)/30 or math.huge
+end
+
+-- Checks a slice of the map each call so the memory covers everything over time.
+local function SweepLos(count)
+	local cols, rows = ceil((Game.mapSizeX or 0)/LOS_CELL), ceil((Game.mapSizeZ or 0)/LOS_CELL)
+	local total = cols*rows
+	for _ = 1, min(count, total) do
+		losSweep = losSweep % total
+		CellAge((losSweep % cols + 0.5)*LOS_CELL, (floor(losSweep/cols) + 0.5)*LOS_CELL)
+		losSweep = losSweep + 1
+	end
+end
+
+-- Cells in a corridor one cell either side of a route that nobody has seen recently.
+local function StaleCells(x1, z1, x2, z2, maxAge)
+	local out, done = {}, {}
+	local length = Dist2D(x1, z1, x2, z2)
+	local steps = max(1, ceil(length/(LOS_CELL*0.5)))
+	local nx, nz = 0, 0
+	if length > 0 then
+		nx, nz = -(z2 - z1)/length, (x2 - x1)/length
+	end
+	for i = 0, steps do
+		local f = i/steps
+		for off = -1, 1 do
+			local x = x1 + (x2 - x1)*f + nx*off*LOS_CELL
+			local z = z1 + (z2 - z1)*f + nz*off*LOS_CELL
+			local key = CellKey(x, z)
+			if not done[key] then
+				done[key] = true
+				local age = CellAge(x, z)
+				if age > maxAge then
+					out[#out + 1] = {x = (floor(x/LOS_CELL) + 0.5)*LOS_CELL, z = (floor(z/LOS_CELL) + 0.5)*LOS_CELL, age = age}
+				end
+			end
+		end
+	end
+	return out
 end
 
 --------------------------------------------------------------------------------
@@ -772,12 +887,47 @@ local function PadPlan()
 		service = service + magpieStats.rearmSeconds + RepairSeconds(mag, {bp = 2.5})*0.5
 	end
 	if n == 0 then
-		return {slots = slots, fleet = 0, need = 0, service = 0}
+		return {slots = slots, fleet = 0, need = 0, service = 0, energy = 0}
 	end
 	service = service/n
 	local cycle = (magpieStats.bursts - 1)*0.8 + 30 -- firing time plus a typical round trip
 	local need = ceil(n*service/(cycle + service))
 	return {slots = slots, fleet = n, need = need, service = service, energy = need*(10 + 2.5)}
+end
+
+local airpadDef = UnitDefNames.staticrearm and padDefs[UnitDefNames.staticrearm.id]
+
+local function FleetAdvice()
+	local plan = PadPlan()
+	local byType, names = {}, {}
+	for _, pad in pairs(pads) do
+		local name = UnitDefs[pad.defID].humanName or UnitDefs[pad.defID].name
+		if not byType[name] then
+			names[#names + 1] = name
+		end
+		byType[name] = (byType[name] or 0) + pad.cap
+	end
+	table.sort(names)
+	local parts = {}
+	for i = 1, #names do
+		parts[#parts + 1] = names[i] .. " " .. byType[names[i]]
+	end
+	local lines = {
+		string.format("Fleet %d Magpies, %d pad slots, about %d needed", plan.fleet, plan.slots, plan.need),
+		string.format("Pad turnaround %.0f s each (%d s rearm plus repair)", plan.service, magpieStats.rearmSeconds),
+	}
+	if plan.need > plan.slots then
+		local cap = airpadDef and airpadDef.cap or 4
+		lines[#lines + 1] = string.format("Short %d slots: build %d more Airpad%s", plan.need - plan.slots,
+			ceil((plan.need - plan.slots)/cap), ceil((plan.need - plan.slots)/cap) == 1 and "" or "s")
+	else
+		lines[#lines + 1] = "Pads keep up with the fleet."
+	end
+	lines[#lines + 1] = string.format("Energy with every needed slot busy: about %d E/s", floor(plan.energy))
+	if #parts > 0 then
+		lines[#lines + 1] = "Slots: " .. table.concat(parts, ", ")
+	end
+	return lines, plan
 end
 
 --------------------------------------------------------------------------------
@@ -823,8 +973,8 @@ local function MagpieMode(unitID)
 	if not CMD_LOOP_ATTACK then
 		return "?"
 	end
-	local index = spFindUnitCmdDesc(unitID, CMD_LOOP_ATTACK)
-	local descs = index and spGetUnitCmdDescs(unitID, index, index)
+	local index = Spring.FindUnitCmdDesc(unitID, CMD_LOOP_ATTACK)
+	local descs = index and Spring.GetUnitCmdDescs(unitID, index, index)
 	local desc = descs and descs[1]
 	if desc and desc.params then
 		return (tonumber(desc.params[1]) == 1) and "loopback" or "strafe"
@@ -842,6 +992,9 @@ end
 
 -- Called when a Magpie's ammo drops by one burst.
 local function RecordBurst(mag)
+	if not Opt('ledger_tracking') then
+		return
+	end
 	local run = mag.run
 	if not run or not run.open then
 		local w = mag.wing or 0
@@ -913,6 +1066,9 @@ end
 
 local function LoadHistory()
 	history = {}
+	if not Opt('career_history') then
+		return
+	end
 	local file = io.open(EXPORT_DIR .. "history.csv", "r")
 	if not file then
 		return
@@ -949,7 +1105,7 @@ local function Export()
 
 	local t = GameTotals()
 	local newHistory = not io.open(EXPORT_DIR .. "history.csv", "r")
-	local hist = io.open(EXPORT_DIR .. "history.csv", "a")
+	local hist = Opt('career_history') and io.open(EXPORT_DIR .. "history.csv", "a")
 	if hist then
 		if newHistory then
 			hist:write(HISTORY_HEADER .. "\n")
@@ -964,7 +1120,7 @@ local function Export()
 end
 
 -- Measured hit factor per target type and mode, against the Magpie Manual figure.
-local function CalibrationTable()
+local function TargetTable()
 	local agg = {}
 	for i = 1, #runs do
 		local run = runs[i]
@@ -981,9 +1137,15 @@ local function CalibrationTable()
 		a.expected = HitFactor(a.target, a.mode)
 		list[#list + 1] = a
 	end
-	table.sort(list, function(a, b) return a.runs > b.runs end)
+	table.sort(list, function(a, b)
+		if a.runs ~= b.runs then
+			return a.runs > b.runs
+		end
+		return a.target .. a.mode < b.target .. b.mode
+	end)
 	return list
 end
+local CalibrationTable = TargetTable
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -1007,8 +1169,11 @@ local function StagingPoint(group)
 		return false
 	end
 	local fromX, fromZ
-	if group.approach then
-		fromX, fromZ = group.approach[1], group.approach[3]
+	local tx0, tz0 = tx, tz
+	if group.approach and group.approach.dx then
+		fromX, fromZ = tx0 - group.approach.dx, tz0 - group.approach.dz
+	elseif group.approach then
+		fromX, fromZ = group.approach.x, group.approach.z
 	else
 		fromX, fromZ = Centroid(UnitList(group.units))
 	end
@@ -1177,6 +1342,29 @@ local function Allocate(targets, pool, horizon)
 	return plan, #pool - used, shortfall
 end
 
+-- Allocation switched off: one whole chambered wing per target, in wing order.
+local function WholeWings(targets, pool, horizon)
+	local byWing, order = {}, {}
+	for i = 1, #pool do
+		local w = magpies[pool[i]].wing or 0
+		if not byWing[w] then
+			byWing[w] = {}
+			order[#order + 1] = w
+		end
+		byWing[w][#byWing[w] + 1] = pool[i]
+	end
+	local plan, used = {}, 0
+	for i = 1, #targets do
+		local defID = spGetUnitDefID(targets[i])
+		local name = defID and UnitDefs[defID].name or "unknown"
+		local mode = Opt('auto_style') and AdviseMode(name, horizon) or "strafe"
+		local list = order[i] and byWing[order[i]] or {}
+		used = used + #list
+		plan[#plan + 1] = {target = targets[i], name = name, mode = mode, need = #list, lost = 0, horizon = horizon, source = "wing", units = list}
+	end
+	return plan, #pool - used, 0
+end
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Actions
@@ -1242,7 +1430,12 @@ function Fire(targetsOverride, rotate)
 		return false
 	end
 	local horizon = tonumber(Opt('horizon'))
-	local plan, spare, shortfall = Allocate(targets, pool, horizon)
+	local plan, spare, shortfall
+	if Opt('allocate') then
+		plan, spare, shortfall = Allocate(targets, pool, horizon)
+	else
+		plan, spare, shortfall = WholeWings(targets, pool, horizon)
+	end
 	local launched = {}
 	for i = 1, #plan do
 		local p = plan[i]
@@ -1295,7 +1488,7 @@ end
 
 function SelectWing(w)
 	local list = UnitList(wings[w].units)
-	spSelectUnitArray(list)
+	Spring.SelectUnitArray(list)
 	return list
 end
 
@@ -1309,16 +1502,15 @@ function SelectReady()
 			end
 		end
 	end
-	spSelectUnitArray(list)
+	Spring.SelectUnitArray(list)
 	return list
 end
 
 function SetApproach()
-	approachPoint = HoveredGround()
-	if approachPoint then
-		Alert("Next Fire approaches from the cursor.")
-	end
-	return approachPoint
+	approachMode = true
+	approachDrag = nil
+	Alert("Drag on the map in the direction to attack, or click where to come from. Right-click cancels.")
+	return true
 end
 
 function PoolPartial()
@@ -1581,6 +1773,40 @@ local function UpdateWings()
 	end
 end
 
+-- Routes from wings to targets, with risk and unseen cells, refreshed twice a second.
+local routeCache = {}
+
+local function UpdateRoutes()
+	local list = {}
+	local function Add(x1, z1, target, label)
+		local tx, ty, tz = spGetUnitPosition(target)
+		if not (tx and x1) then
+			return
+		end
+		local route = {x1 = x1, z1 = z1, x2 = tx, z2 = tz, y = ty, label = label}
+		route.risk = RouteRisk(x1, z1, tx, tz)
+		if Opt('stale_intel') then
+			route.stale = StaleCells(x1, z1, tx, tz, Opt('stale_seconds'))
+		end
+		list[#list + 1] = route
+	end
+	for _, group in pairs(groups) do
+		local cx, cz = Centroid(UnitList(group.units))
+		Add(cx, cz, group.target, WING_LETTER[group.wing] or "?")
+	end
+	local readyX, readyZ = Centroid(ReadyPool())
+	for i = 1, #marks do
+		if IsAliveEnemy(marks[i]) then
+			Add(readyX, readyZ, marks[i], tostring(i))
+		end
+	end
+	local hovered = Opt('show_card') and HoveredEnemy()
+	if hovered then
+		Add(readyX, readyZ, hovered, "")
+	end
+	routeCache = list
+end
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Callins
@@ -1651,7 +1877,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	local attacker = attackerID and magpies[attackerID]
 	if attacker and not Spring.AreTeamsAllied(unitTeam, myTeamID) then
 		local run = attacker.run
-		if run then
+		if run and Opt('ledger_tracking') then
 			run.damage = run.damage + damage
 			lastHit[unitID] = {run = run, frame = frame}
 		end
@@ -1677,7 +1903,7 @@ function widget:UnitEnteredLos(unitID, unitTeam)
 		for gid, group in pairs(groups) do
 			local tx, _, tz = spGetUnitPosition(group.target)
 			local cx, cz = Centroid(UnitList(group.units))
-			if tx and cx and not t.fighter and DistToSegment(t.x, t.z, cx, cz, tx, tz) <= t.range then
+			if Opt('route_alert') and tx and cx and not t.fighter and DistToSegment(t.x, t.z, cx, cz, tx, tz) <= t.range then
 				Alert("New " .. aaDefs[defID].name .. " on wing " .. (WING_LETTER[group.wing] or "?") .. "'s route.", "route" .. gid .. "_" .. unitID, "sounds/reply/alarm.wav")
 			end
 		end
@@ -1701,6 +1927,12 @@ function widget:GameFrame(n)
 	end
 	if n % 6 == 2 then
 		UpdateGroups()
+	end
+	if n % 15 == 11 and (Opt('route_lines') or Opt('stale_intel')) then
+		UpdateRoutes()
+	end
+	if n % 30 == 13 and Opt('stale_intel') then
+		SweepLos(64)
 	end
 	if n % 15 == 7 then
 		UpdateThreats()
@@ -1727,8 +1959,52 @@ function widget:PlayerChanged()
 	if CheckSpec() then
 		return
 	end
-	myTeamID = spGetMyTeamID()
-	myAllyTeamID = spGetMyAllyTeamID()
+	myTeamID = Spring.GetMyTeamID()
+	myAllyTeamID = Spring.GetMyAllyTeamID()
+end
+
+function AssignSelected(w)
+	local selected = Spring.GetSelectedUnits() or {}
+	local n = 0
+	for i = 1, #selected do
+		if magpies[selected[i]] then
+			AddToWing(selected[i], w)
+			n = n + 1
+		end
+	end
+	return n
+end
+
+function ToggleMenu()
+	menuOpen = not menuOpen
+	return menuOpen
+end
+
+-- Change an option and keep the settings menu in step.
+local function SetOption(key, value)
+	local option = options[key]
+	option.value = value
+	if WG.SetWidgetOption then
+		WG.SetWidgetOption(widget:GetInfo().name, option.path or options_path, key, value)
+	end
+	if key == 'career_history' and value then
+		LoadHistory()
+	end
+end
+
+-- Next value for a menu row: flip a switch, or step through a list.
+local function NextOptionValue(key)
+	local option = options[key]
+	if option.type == 'bool' then
+		return not option.value
+	end
+	local items = option.items
+	for i = 1, #items do
+		if items[i].key == option.value then
+			return items[i % #items + 1].key
+		end
+	end
+	return items[1].key
 end
 
 local ACTIONS = {
@@ -1741,22 +2017,23 @@ local ACTIONS = {
 	revolver_pool = function() PoolPartial() end,
 	revolver_calibrate = function() ToggleCalibration() end,
 	revolver_ledger = function() options.show_ledger.value = not options.show_ledger.value end,
+	revolver_menu = function() ToggleMenu() end,
 }
 
 function widget:Initialize()
 	if not magpieDefID then
-		spEcho("Revolver: no Magpie unit in this game, disabling.")
+		Spring.Echo("Revolver: no Magpie unit in this game, disabling.")
 		widgetHandler:RemoveWidget()
 		return
 	end
 	if CheckSpec() then
 		return
 	end
-	myTeamID = spGetMyTeamID()
-	myAllyTeamID = spGetMyAllyTeamID()
-	frame = spGetGameFrame()
+	myTeamID = Spring.GetMyTeamID()
+	myAllyTeamID = Spring.GetMyAllyTeamID()
+	frame = Spring.GetGameFrame()
 
-	local units = spGetTeamUnits(myTeamID) or {}
+	local units = Spring.GetTeamUnits(myTeamID) or {}
 	for i = 1, #units do
 		local unitID = units[i]
 		local defID = spGetUnitDefID(unitID)
@@ -1767,7 +2044,7 @@ function widget:Initialize()
 	end
 	for _, teamID in ipairs(Spring.GetTeamList(myAllyTeamID) or {}) do
 		if teamID ~= myTeamID then
-			local allied = spGetTeamUnits(teamID) or {}
+			local allied = Spring.GetTeamUnits(teamID) or {}
 			for i = 1, #allied do
 				local defID = spGetUnitDefID(allied[i])
 				if padDefs[defID] then
@@ -1780,7 +2057,7 @@ function widget:Initialize()
 	-- Anti-air already in sight when the widget starts.
 	local visible = Spring.GetAllUnits() or {}
 	for i = 1, #visible do
-		local teamID = spGetUnitTeam(visible[i])
+		local teamID = Spring.GetUnitTeam(visible[i])
 		if teamID and not Spring.AreTeamsAllied(teamID, myTeamID) then
 			widget:UnitEnteredLos(visible[i], teamID)
 		end
@@ -1791,6 +2068,7 @@ function widget:Initialize()
 	end
 	for w = 1, WING_COUNT do
 		widgetHandler.actionHandler:AddAction(widget, "revolver_wing_" .. w, function() SelectWing(w) end, nil, "t")
+		widgetHandler.actionHandler:AddAction(widget, "revolver_assign_" .. w, function() AssignSelected(w) end, nil, "t")
 	end
 	LoadHistory()
 
@@ -1810,6 +2088,7 @@ function widget:Shutdown()
 	end
 	for w = 1, WING_COUNT do
 		widgetHandler.actionHandler:RemoveAction(widget, "revolver_wing_" .. w)
+		widgetHandler.actionHandler:RemoveAction(widget, "revolver_assign_" .. w)
 	end
 	-- Hand fire states back.
 	for unitID, mag in pairs(magpies) do
@@ -1824,9 +2103,9 @@ end
 --------------------------------------------------------------------------------
 -- Drawing
 
-local glColor, glRect, glText, glLineWidth = gl.Color, gl.Rect, gl.Text, gl.LineWidth
-local glBeginEnd, glVertex, glPushMatrix, glPopMatrix = gl.BeginEnd, gl.Vertex, gl.PushMatrix, gl.PopMatrix
-local glTranslate, glBillboard, glDrawGroundCircle = gl.Translate, gl.Billboard, gl.DrawGroundCircle
+local CardLines
+do
+
 local GL_LINE_STRIP, GL_TRIANGLE_FAN, GL_LINES = GL.LINE_STRIP, GL.TRIANGLE_FAN, GL.LINES
 
 local COLOR = {
@@ -1843,7 +2122,7 @@ local COLOR = {
 }
 
 local function ChamberCentre(w)
-	local vsx = spGetViewGeometry()
+	local vsx = Spring.GetViewGeometry()
 	local cx, cy = vsx - hud.x, hud.y
 	local angle = pi/2 - (w - 1)*pi/3
 	return cx + cos(angle)*(hud.radius - hud.chamber - 4), cy + sin(angle)*(hud.radius - hud.chamber - 4), cx, cy
@@ -1851,44 +2130,44 @@ end
 
 local function Circle(x, y, r, segments, fraction)
 	fraction = fraction or 1
-	glBeginEnd(GL_LINE_STRIP, function()
+	gl.BeginEnd(GL_LINE_STRIP, function()
 		local n = max(2, floor(segments*fraction))
 		for i = 0, n do
 			local a = pi/2 - 2*pi*fraction*i/n
-			glVertex(x + cos(a)*r, y + sin(a)*r)
+			gl.Vertex(x + cos(a)*r, y + sin(a)*r)
 		end
 	end)
 end
 
 local function Disc(x, y, r, segments)
-	glBeginEnd(GL_TRIANGLE_FAN, function()
-		glVertex(x, y)
+	gl.BeginEnd(GL_TRIANGLE_FAN, function()
+		gl.Vertex(x, y)
 		for i = 0, segments do
 			local a = 2*pi*i/segments
-			glVertex(x + cos(a)*r, y + sin(a)*r)
+			gl.Vertex(x + cos(a)*r, y + sin(a)*r)
 		end
 	end)
 end
 
 local function DrawCylinder()
 	local _, _, cx, cy = ChamberCentre(1)
-	glColor(COLOR.panel)
+	gl.Color(COLOR.panel)
 	Disc(cx, cy, hud.radius, 48)
 	for w = 1, WING_COUNT do
 		local x, y = ChamberCentre(w)
 		local s = WingSummary(w)
-		glColor(COLOR.ring)
+		gl.Color(COLOR.ring)
 		Disc(x, y, hud.chamber, 24)
-		glLineWidth(3)
-		glColor(COLOR.ring)
+		gl.LineWidth(3)
+		gl.Color(COLOR.ring)
 		Circle(x, y, hud.chamber - 3, 32, 1)
 		if s.n > 0 then
-			glColor(COLOR[s.state] or COLOR.idle)
+			gl.Color(COLOR[s.state] or COLOR.idle)
 			Circle(x, y, hud.chamber - 3, 32, s.ammo)
 		end
-		glLineWidth(1)
-		glColor(COLOR.text)
-		glText(WING_LETTER[w], x, y + 2, 15, "cv")
+		gl.LineWidth(1)
+		gl.Color(COLOR.text)
+		gl.Text(WING_LETTER[w], x, y + 2, 15, "cv")
 		local sub
 		if s.n == 0 then
 			sub = "-"
@@ -1897,22 +2176,25 @@ local function DrawCylinder()
 		else
 			sub = s.n .. " " .. floor(s.ammo*100 + 0.5) .. "%"
 		end
-		glColor(COLOR.muted)
-		glText(sub, x, y - 12, 10, "cv")
+		gl.Color(COLOR.muted)
+		gl.Text(sub, x, y - 12, 10, "cv")
 	end
-	local plan = PadPlan()
-	glColor(COLOR.muted)
-	glText("Pads " .. plan.slots .. " / need " .. plan.need .. "   Fleet " .. plan.fleet, cx, cy - hud.radius - 14, 11, "cv")
+	gl.Color(COLOR.muted)
+	if Opt('fleet_advisor') then
+		local plan = PadPlan()
+		gl.Text("Pads " .. plan.slots .. " / need " .. plan.need .. "   Fleet " .. plan.fleet, cx, cy - hud.radius - 14, 11, "cv")
+	end
+	gl.Text("menu", cx, cy, 9, "cv")
 	for i = 1, #alerts do
 		local a = alerts[#alerts - i + 1]
 		if frame - a.frame < 30*8 then
-			glText(a.text, cx, cy + hud.radius + 6 + 14*(i - 1), 11, "cv")
+			gl.Text(a.text, cx, cy + hud.radius + 6 + 14*(i - 1), 11, "cv")
 		end
 	end
-	glColor(1, 1, 1, 1)
+	gl.Color(1, 1, 1, 1)
 end
 
-local function CardLines(target)
+function CardLines(target)
 	local defID = spGetUnitDefID(target)
 	local ud = defID and UnitDefs[defID]
 	if not ud then
@@ -1965,70 +2247,189 @@ local function DrawCard()
 	local mx, my = spGetMouseState()
 	local w, h = 330, 16*#lines + 10
 	local x, y = mx + 24, my - 12
-	glColor(COLOR.panel)
-	glRect(x, y - h, x + w, y)
+	gl.Color(COLOR.panel)
+	gl.Rect(x, y - h, x + w, y)
 	for i = 1, #lines do
-		glColor(i == 1 and COLOR.text or COLOR.muted)
-		glText(lines[i], x + 8, y - 16*i, 12, "o")
+		gl.Color(i == 1 and COLOR.text or COLOR.muted)
+		gl.Text(lines[i], x + 8, y - 16*i, 12, "o")
 	end
-	glColor(1, 1, 1, 1)
+	gl.Color(1, 1, 1, 1)
+end
+
+local function LedgerRect()
+	local _, vsy = Spring.GetViewGeometry()
+	local h = ledgerPanel.h + (Opt('fleet_advisor') and 70 or 0)
+	return ledgerPanel.x, vsy - ledgerPanel.y, ledgerPanel.w, h
 end
 
 local function DrawLedger()
-	local vsx, vsy = spGetViewGeometry()
-	local x, y, w, h = ledgerPanel.x, vsy - ledgerPanel.y, ledgerPanel.w, ledgerPanel.h
-	glColor(COLOR.panel)
-	glRect(x, y - h, x + w, y)
+	local x, y, w, h = LedgerRect()
+	gl.Color(COLOR.panel)
+	gl.Rect(x, y - h, x + w, y)
 	local t = GameTotals()
-	glColor(COLOR.text)
-	glText("Revolver ledger", x + 8, y - 16, 13, "o")
-	glColor(COLOR.muted)
-	glText(string.format("Runs %d  Bursts %d  Hit %s  Kills %d  Lost %d", t.runs, t.bursts,
+	gl.Color(COLOR.text)
+	local view = Opt('ledger_view')
+	gl.Text("Revolver ledger", x + 8, y - 16, 13, "o")
+	gl.Color(COLOR.muted)
+	gl.Text(view == 'runs' and "[per run]  per target" or "per run  [per target]", x + w - 8, y - 16, 11, "ro")
+	gl.Text(string.format("Runs %d  Bursts %d  Hit %s  Kills %d  Lost %d", t.runs, t.bursts,
 		t.hit and string.format("%.2f", t.hit) or "-", t.kills, t.lost), x + 8, y - 32, 11, "o")
-	glText(string.format("Metal killed %d  lost %d  Pad energy %d", totals.metalKilled, totals.metalLost,
+	gl.Text(string.format("Metal killed %d  lost %d  Pad energy %d", totals.metalKilled, totals.metalLost,
 		floor(totals.rearmEnergy + totals.repairEnergy)), x + 8, y - 46, 11, "o")
-	if #history > 0 then
+	if #history > 0 and Opt('career_history') then
 		local sum, n = 0, 0
 		for i = max(1, #history - 9), #history do
 			sum, n = sum + history[i].hit, n + 1
 		end
-		glText(string.format("Last %d games: hit %.2f", n, sum/n), x + 8, y - 60, 11, "o")
+		gl.Text(string.format("Last %d games: hit %.2f", n, sum/n), x + 8, y - 60, 11, "o")
 	end
 
-	-- Hit factor per run, last 20, against the simulated factor.
-	local gx, gy, gw, gh = x + 30, y - h + 20, w - 40, h - 100
-	glColor(COLOR.ring)
-	glRect(gx, gy, gx + gw, gy + 1)
-	glRect(gx, gy + gh, gx + gw, gy + gh + 1)
-	glColor(COLOR.muted)
-	glText("1.0", gx - 4, gy + gh, 9, "rv")
-	glText("0", gx - 4, gy, 9, "rv")
-	local first = max(1, #runs - 19)
-	local slot = gw/20
-	for i = first, #runs do
-		local run = runs[i]
-		local hit = RunHitFactor(run)
-		local px = gx + (i - first)*slot + slot*0.5
-		if hit then
-			glColor(run.mode == "loopback" and COLOR.attacking or COLOR.ready)
-			glRect(px - slot*0.3, gy, px + slot*0.3, gy + min(1, hit)*gh)
+	local gx, gy, gw, gh = x + 30, y - ledgerPanel.h + 20, w - 40, ledgerPanel.h - 100
+	if view == 'runs' then
+		-- Hit factor per run, last 20, against the simulated factor.
+		gl.Color(COLOR.ring)
+		gl.Rect(gx, gy, gx + gw, gy + 1)
+		gl.Rect(gx, gy + gh, gx + gw, gy + gh + 1)
+		gl.Color(COLOR.muted)
+		gl.Text("1.0", gx - 4, gy + gh, 9, "rv")
+		gl.Text("0", gx - 4, gy, 9, "rv")
+		local first = max(1, #runs - 19)
+		local slot = gw/20
+		for i = first, #runs do
+			local run = runs[i]
+			local hit = RunHitFactor(run)
+			local px = gx + (i - first)*slot + slot*0.5
+			if hit then
+				gl.Color(run.mode == "loopback" and COLOR.attacking or COLOR.ready)
+				gl.Rect(px - slot*0.3, gy, px + slot*0.3, gy + min(1, hit)*gh)
+			end
+			local expected = ExpectedHitFactor(run)
+			if expected then
+				gl.Color(COLOR.text)
+				gl.Rect(px - slot*0.45, gy + expected*gh, px + slot*0.45, gy + expected*gh + 2)
+			end
 		end
-		local expected = ExpectedHitFactor(run)
-		if expected then
-			glColor(COLOR.text)
-			glRect(px - slot*0.45, gy + expected*gh, px + slot*0.45, gy + expected*gh + 2)
+	else
+		-- Hit factor per target type and style: bar is measured, tick is the Magpie Manual figure.
+		local list = TargetTable()
+		local rows = min(6, #list)
+		if rows == 0 then
+			gl.Color(COLOR.muted)
+			gl.Text("No single-target runs yet.", gx, gy + gh*0.5, 11, "o")
+		end
+		local rowH = gh/6
+		local labelW = 120
+		for i = 1, rows do
+			local a = list[i]
+			local ry = gy + gh - rowH*i
+			local name = BreakpointEntry(a.target, a.mode) and BreakpointEntry(a.target, a.mode).name or a.target
+			gl.Color(COLOR.muted)
+			gl.Text(string.format("%s %s", name, a.mode == "loopback" and "L" or "S"), gx - 22, ry + rowH*0.3, 10, "o")
+			local bx, bw = gx + labelW - 22, gw - labelW - 30
+			gl.Color(a.mode == "loopback" and COLOR.attacking or COLOR.ready)
+			gl.Rect(bx, ry + 2, bx + bw*min(1, a.measured), ry + rowH - 2)
+			gl.Color(COLOR.text)
+			gl.Rect(bx + bw*a.expected - 1, ry, bx + bw*a.expected + 1, ry + rowH)
+			gl.Text(string.format("%.2f/%.2f", a.measured, a.expected), bx + bw + 4, ry + rowH*0.3, 9, "o")
 		end
 	end
 	if calibration then
 		local list = CalibrationTable()
-		glColor(COLOR.text)
-		for i = 1, min(3, #list) do
+		gl.Color(COLOR.text)
+		for i = 1, min(1, #list) do
 			local a = list[i]
-			glText(string.format("%s %s: measured %.2f vs %.2f (%d runs)", a.target, a.mode, a.measured, a.expected, a.runs),
-				x + 8, y - 74 - 13*(i - 1), 10, "o")
+			gl.Text(string.format("Calibrating %s %s: %.2f vs %.2f (%d runs)", a.target, a.mode, a.measured, a.expected, a.runs),
+				x + 8, y - 74, 10, "o")
 		end
 	end
-	glColor(1, 1, 1, 1)
+	if Opt('fleet_advisor') then
+		local lines = FleetAdvice()
+		gl.Color(COLOR.muted)
+		for i = 1, #lines do
+			gl.Text(lines[i], x + 8, y - ledgerPanel.h - 12*i + 4, 10, "o")
+		end
+	end
+	gl.Color(1, 1, 1, 1)
+end
+
+-- In-game feature menu
+local menuPanel = {w = 420, row = 18}
+
+local function MenuLayout()
+	local vsx, vsy = Spring.GetViewGeometry()
+	local rows = {}
+	for i = 1, #MENU do
+		rows[#rows + 1] = {header = MENU[i].title}
+		for j = 1, #MENU[i].keys do
+			rows[#rows + 1] = {key = MENU[i].keys[j]}
+		end
+	end
+	rows[#rows + 1] = {close = true}
+	local h = #rows*menuPanel.row + 30
+	local x = floor(vsx*0.5 - menuPanel.w*0.5)
+	local top = floor(vsy*0.5 + h*0.5)
+	for i = 1, #rows do
+		rows[i].y1 = top - 26 - i*menuPanel.row
+		rows[i].y2 = rows[i].y1 + menuPanel.row
+	end
+	return rows, x, top, menuPanel.w, h
+end
+
+local function OptionText(key)
+	local option = options[key]
+	if option.type == 'bool' then
+		return option.value and "On" or "Off"
+	end
+	for i = 1, #option.items do
+		if option.items[i].key == option.value then
+			return option.items[i].name
+		end
+	end
+	return tostring(option.value)
+end
+
+local function DrawMenu()
+	local rows, x, top, w, h = MenuLayout()
+	gl.Color(COLOR.panel)
+	gl.Rect(x, top - h, x + w, top)
+	gl.Color(COLOR.text)
+	gl.Text("Revolver features", x + 10, top - 20, 14, "o")
+	for i = 1, #rows do
+		local r = rows[i]
+		if r.header then
+			gl.Color(COLOR.attacking)
+			gl.Text(r.header, x + 10, r.y1 + 4, 12, "o")
+		elseif r.close then
+			gl.Color(COLOR.muted)
+			gl.Text("Close", x + w*0.5, r.y1 + 4, 12, "co")
+		else
+			local option = options[r.key]
+			local on = option.type ~= 'bool' or option.value
+			gl.Color(COLOR.text)
+			gl.Text(option.name, x + 24, r.y1 + 4, 11, "o")
+			gl.Color(on and COLOR.ready or COLOR.muted)
+			gl.Text(OptionText(r.key), x + w - 10, r.y1 + 4, 11, "ro")
+		end
+	end
+	gl.Color(1, 1, 1, 1)
+end
+
+local function MenuClick(mx, my)
+	local rows, x, top, w, h = MenuLayout()
+	if mx < x or mx > x + w or my < top - h or my > top then
+		return false
+	end
+	for i = 1, #rows do
+		local r = rows[i]
+		if my >= r.y1 and my < r.y2 then
+			if r.close then
+				menuOpen = false
+			elseif r.key then
+				SetOption(r.key, NextOptionValue(r.key))
+			end
+		end
+	end
+	return true
 end
 
 function widget:DrawScreen()
@@ -2041,34 +2442,79 @@ function widget:DrawScreen()
 	if Opt('show_ledger') then
 		DrawLedger()
 	end
+	if menuOpen then
+		DrawMenu()
+	end
 end
 
 function widget:DrawWorldPreUnit()
 	if Opt('threat_map') then
-		glLineWidth(1.5)
+		gl.LineWidth(1.5)
 		for unitID, t in pairs(threats) do
 			if not t.fighter then
 				-- Redder the faster it kills a Magpie.
 				local danger = max(0, min(1, 1 - t.ttk/15))
-				glColor(1, 0.75 - 0.6*danger, 0.3, t.inLos and 0.55 or 0.25)
-				glDrawGroundCircle(t.x, t.y, t.z, t.range, 48)
+				gl.Color(1, 0.75 - 0.6*danger, 0.3, t.inLos and 0.55 or 0.25)
+				gl.DrawGroundCircle(t.x, t.y, t.z, t.range, 48)
 			end
 		end
 	end
-	glColor(COLOR.attacking)
+	if Opt('stale_intel') then
+		gl.Color(0.55, 0.55, 0.62, 0.35)
+		for i = 1, #routeCache do
+			local stale = routeCache[i].stale or {}
+			for j = 1, #stale do
+				local c = stale[j]
+				gl.DrawGroundCircle(c.x, spGetGroundHeight(c.x, c.z) or 0, c.z, LOS_CELL*0.45, 12)
+			end
+		end
+	end
+	if Opt('route_lines') then
+		gl.LineWidth(2)
+		for i = 1, #routeCache do
+			local r = routeCache[i]
+			-- Green when safe, red when the route alone would kill a Magpie.
+			local danger = max(0, min(1, r.risk/magpieStats.maxHealth))
+			gl.Color(0.3 + 0.7*danger, 0.9 - 0.7*danger, 0.35, 0.8)
+			gl.BeginEnd(GL_LINES, function()
+				gl.Vertex(r.x1, (spGetGroundHeight(r.x1, r.z1) or 0) + 40, r.z1)
+				gl.Vertex(r.x2, r.y + 40, r.z2)
+			end)
+		end
+	end
+	if approachDrag then
+		gl.LineWidth(3)
+		gl.Color(COLOR.ready)
+		gl.BeginEnd(GL_LINES, function()
+			gl.Vertex(approachDrag[1], (spGetGroundHeight(approachDrag[1], approachDrag[2]) or 0) + 20, approachDrag[2])
+			gl.Vertex(approachDrag[3], (spGetGroundHeight(approachDrag[3], approachDrag[4]) or 0) + 20, approachDrag[4])
+		end)
+	end
+	gl.Color(COLOR.attacking)
 	for i = 1, #marks do
 		local x, y, z = spGetUnitPosition(marks[i])
 		if x then
-			glDrawGroundCircle(x, y, z, 60, 20)
+			gl.DrawGroundCircle(x, y, z, 60, 20)
 		end
 	end
-	glLineWidth(1)
-	glColor(1, 1, 1, 1)
+	gl.LineWidth(1)
+	gl.Color(1, 1, 1, 1)
 end
 
 function widget:DrawWorld()
-	-- Wing letters over airborne wings, mark numbers, reload timers.
-	for w = 1, WING_COUNT do
+	-- Wing letters over airborne wings, mark numbers, reload timers, route risk.
+	if Opt('route_lines') then
+		for i = 1, #routeCache do
+			local r = routeCache[i]
+			gl.PushMatrix()
+			gl.Translate((r.x1 + r.x2)*0.5, (r.y or 0) + 60, (r.z1 + r.z2)*0.5)
+			gl.Billboard()
+			gl.Color(COLOR.text)
+			gl.Text(string.format("%s risk %d", r.label, floor(r.risk)), 0, 0, 12, "cv")
+			gl.PopMatrix()
+		end
+	end
+	for w = 1, Opt('wing_labels') and WING_COUNT or 0 do
 		local list = {}
 		for unitID in pairs(wings[w].units) do
 			local mag = magpies[unitID]
@@ -2080,24 +2526,24 @@ function widget:DrawWorld()
 			local cx, cz = Centroid(list)
 			if cx then
 				local cy = (spGetGroundHeight(cx, cz) or 0) + 220
-				glPushMatrix()
-				glTranslate(cx, cy, cz)
-				glBillboard()
-				glColor(COLOR.ready)
-				glText(WING_LETTER[w] .. " " .. #list, 0, 0, 18, "cv")
-				glPopMatrix()
+				gl.PushMatrix()
+				gl.Translate(cx, cy, cz)
+				gl.Billboard()
+				gl.Color(COLOR.ready)
+				gl.Text(WING_LETTER[w] .. " " .. #list, 0, 0, 18, "cv")
+				gl.PopMatrix()
 			end
 		end
 	end
 	for i = 1, #marks do
 		local x, y, z = spGetUnitPosition(marks[i])
 		if x then
-			glPushMatrix()
-			glTranslate(x, y + 80, z)
-			glBillboard()
-			glColor(COLOR.attacking)
-			glText(tostring(i), 0, 0, 20, "cv")
-			glPopMatrix()
+			gl.PushMatrix()
+			gl.Translate(x, y + 80, z)
+			gl.Billboard()
+			gl.Color(COLOR.attacking)
+			gl.Text(tostring(i), 0, 0, 20, "cv")
+			gl.PopMatrix()
 		end
 	end
 	if Opt('reload_tracking') then
@@ -2107,22 +2553,39 @@ function widget:DrawWorld()
 			if def and def.reload then
 				local left = def.reload - (frame - fired)/30
 				if left > 0 then
-					glPushMatrix()
-					glTranslate(t.x, t.y + 90, t.z)
-					glBillboard()
-					glColor(COLOR.ready)
-					glText(string.format("reload %.0fs", left), 0, 0, 14, "cv")
-					glPopMatrix()
+					gl.PushMatrix()
+					gl.Translate(t.x, t.y + 90, t.z)
+					gl.Billboard()
+					gl.Color(COLOR.ready)
+					gl.Text(string.format("reload %.0fs", left), 0, 0, 14, "cv")
+					gl.PopMatrix()
 				else
 					reloadSeen[unitID] = nil
 				end
 			end
 		end
 	end
-	glColor(1, 1, 1, 1)
+	gl.Color(1, 1, 1, 1)
+end
+
+local function LedgerHit(x, y)
+	if not Opt('show_ledger') then
+		return false
+	end
+	local lx, ly, lw, lh = LedgerRect()
+	return x >= lx and x <= lx + lw and y <= ly and y >= ly - lh
 end
 
 function widget:IsAbove(x, y)
+	if menuOpen then
+		local _, mx, top, w, h = MenuLayout()
+		if x >= mx and x <= mx + w and y <= top and y >= top - h then
+			return true
+		end
+	end
+	if LedgerHit(x, y) then
+		return true
+	end
 	if not Opt('show_hud') then
 		return false
 	end
@@ -2130,9 +2593,48 @@ function widget:IsAbove(x, y)
 	return Dist2D(x, y, cx, cy) <= hud.radius
 end
 
+local function GroundAt(x, y)
+	local kind, pos = spTraceScreenRay(x, y, true)
+	if kind == "ground" and pos then
+		return pos[1], pos[3]
+	end
+end
+
 function widget:MousePress(x, y, button)
-	if button ~= 1 or not widget:IsAbove(x, y) then
+	if approachMode then
+		if button == 3 then
+			approachMode, approachDrag = false, nil
+			Alert("Approach cancelled.")
+			return true
+		elseif button == 1 then
+			local gx, gz = GroundAt(x, y)
+			if gx then
+				approachDrag = {gx, gz, gx, gz}
+				return true
+			end
+		end
 		return false
+	end
+	if button ~= 1 then
+		return false
+	end
+	if menuOpen and MenuClick(x, y) then
+		return true
+	end
+	if LedgerHit(x, y) then
+		local lx, ly = LedgerRect()
+		if y >= ly - 24 then
+			SetOption('ledger_view', NextOptionValue('ledger_view'))
+		end
+		return true
+	end
+	if not (Opt('show_hud') and widget:IsAbove(x, y)) then
+		return false
+	end
+	local _, _, cx, cy = ChamberCentre(1)
+	if Dist2D(x, y, cx, cy) <= 16 then
+		ToggleMenu()
+		return true
 	end
 	for w = 1, WING_COUNT do
 		local chx, chy = ChamberCentre(w)
@@ -2142,13 +2644,40 @@ function widget:MousePress(x, y, button)
 			if lastClick.wing == w and now - lastClick.time < 12 then
 				local wx, wz = Centroid(list)
 				if wx then
-					spSetCameraTarget(wx, spGetGroundHeight(wx, wz) or 0, wz)
+					Spring.SetCameraTarget(wx, spGetGroundHeight(wx, wz) or 0, wz)
 				end
 			end
 			lastClick.wing, lastClick.time = w, now
 			return true
 		end
 	end
+	return true
+end
+
+function widget:MouseMove(x, y)
+	if approachDrag then
+		local gx, gz = GroundAt(x, y)
+		if gx then
+			approachDrag[3], approachDrag[4] = gx, gz
+		end
+	end
+end
+
+function widget:MouseRelease(x, y, button)
+	if not approachDrag then
+		return false
+	end
+	widget:MouseMove(x, y)
+	local x1, z1, x2, z2 = approachDrag[1], approachDrag[2], approachDrag[3], approachDrag[4]
+	local length = Dist2D(x1, z1, x2, z2)
+	if length > 80 then
+		approachPoint = {dx = (x2 - x1)/length, dz = (z2 - z1)/length}
+		Alert("Next Fire attacks along the dragged direction.")
+	else
+		approachPoint = {x = x1, z = z1}
+		Alert("Next Fire comes from the clicked point.")
+	end
+	approachMode, approachDrag = false, nil
 	return true
 end
 
@@ -2161,8 +2690,16 @@ function widget:GetTooltip(x, y)
 				WING_LETTER[w], s.n, s.ready, floor(s.ammo*100), floor(s.health*100))
 		end
 	end
-	return "Revolver"
+	if menuOpen then
+		return "Click a feature to switch it on or off."
+	end
+	return "Revolver. Click the middle for the feature menu."
 end
+
+widget.RevolverMenuLayout = MenuLayout
+widget.RevolverLedgerRect = LedgerRect
+
+end -- Drawing
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -2194,4 +2731,9 @@ widget.RevolverInternals = {
 	Recall = function() return Recall() end, SelectWing = function(w) return SelectWing(w) end,
 	SelectReady = function() return SelectReady() end, SetApproach = function() return SetApproach() end,
 	PoolPartial = function() return PoolPartial() end, ToggleCalibration = function() return ToggleCalibration() end,
+	ToggleMenu = function() return ToggleMenu() end, AssignSelected = function(w) return AssignSelected(w) end,
+	menuOpen = function() return menuOpen end, approachMode = function() return approachMode end,
+	routes = function() return routeCache end, losMemory = function() return losMemory end,
+	StaleCells = StaleCells, CellAge = CellAge, SweepLos = SweepLos, FleetAdvice = FleetAdvice, TargetTable = TargetTable,
+	WholeWings = WholeWings, SetOption = SetOption, NextOptionValue = NextOptionValue, UpdateRoutes = UpdateRoutes,
 }
