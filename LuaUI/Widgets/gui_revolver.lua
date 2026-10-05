@@ -143,7 +143,7 @@ end
 -- Options
 
 -- Positions are fractions of the screen so they survive resolution changes. Both panels can be dragged.
--- Sizes are at 1080p and 100%; both panels scale with screen height and their size option (mouse wheel over a panel).
+-- Sizes are at 1080p and 100%; both panels scale with screen height and their size option (drag the grip on a panel).
 local HUD_DEFAULT = {fx = 1 - 210/1920, fy = 270/1080}
 local LEDGER_DEFAULT = {fx = 20/1920, fy = 1 - 240/1080}
 local hud = {fx = HUD_DEFAULT.fx, fy = HUD_DEFAULT.fy, radius = 92, chamber = 30, scale = 1}
@@ -204,7 +204,7 @@ options = {
 	ready_health = {name = 'Ready at health (%)', desc = 'A wing is chambered when its average health reaches this.', type = 'number', value = 70, min = 10, max = 100, step = 5, path = PATH.cylinder},
 	spare_wing = Switch('Use wing F as the spare wing', 'Half-empty Magpies are gathered into wing F so full wings stay chambered.', false, PATH.cylinder),
 	show_hud = Switch('Show cylinder', nil, true, PATH.cylinder),
-	hud_size = {name = 'Cylinder size (%)', desc = 'Also: mouse wheel over the cylinder.', type = 'number', value = 140, min = 60, max = 300, step = 10, path = PATH.cylinder},
+	hud_size = {name = 'Cylinder size (%)', desc = 'Also: drag the grip at the lower right of the cylinder.', type = 'number', value = 140, min = 60, max = 300, step = 10, path = PATH.cylinder},
 	wing_labels = Switch('Wing labels over Magpies', nil, true, PATH.cylinder),
 	fleet_advisor = Switch('Fleet and pad advisor', 'Pad slots against what the fleet needs, under the cylinder and in the ledger.', true, PATH.cylinder),
 
@@ -280,7 +280,7 @@ options = {
 	-- Ledger
 	ledger_tracking = Switch('Record sorties', nil, true, PATH.ledger),
 	show_ledger = Switch('Show ledger', nil, false, PATH.ledger),
-	ledger_size = {name = 'Ledger size (%)', desc = 'Also: mouse wheel over the ledger.', type = 'number', value = 120, min = 60, max = 300, step = 10, path = PATH.ledger},
+	ledger_size = {name = 'Ledger size (%)', desc = 'Also: drag the grip in the lower right corner of the ledger.', type = 'number', value = 120, min = 60, max = 300, step = 10, path = PATH.ledger},
 	ledger_view = {
 		name = 'Ledger graph', type = 'radioButton', value = 'runs', path = PATH.ledger,
 		items = {
@@ -2516,7 +2516,8 @@ function widget:Initialize()
 end
 
 function widget:GetConfigData()
-	return {hudX = hud.fx, hudY = hud.fy, ledgerX = ledgerPanel.fx, ledgerY = ledgerPanel.fy}
+	return {hudX = hud.fx, hudY = hud.fy, ledgerX = ledgerPanel.fx, ledgerY = ledgerPanel.fy,
+		hudSize = options.hud_size.value, ledgerSize = options.ledger_size.value}
 end
 
 function widget:SetConfigData(data)
@@ -2529,6 +2530,12 @@ function widget:SetConfigData(data)
 	end
 	hud.fx, hud.fy = Fraction(data.hudX, HUD_DEFAULT.fx), Fraction(data.hudY, HUD_DEFAULT.fy)
 	ledgerPanel.fx, ledgerPanel.fy = Fraction(data.ledgerX, LEDGER_DEFAULT.fx), Fraction(data.ledgerY, LEDGER_DEFAULT.fy)
+	for key, saved in pairs({hud_size = data.hudSize, ledger_size = data.ledgerSize}) do
+		local v = tonumber(saved)
+		if v and v >= options[key].min and v <= options[key].max then
+			options[key].value = v
+		end
+	end
 end
 
 function widget:Shutdown()
@@ -3337,6 +3344,7 @@ function widget:DrawScreen()
 	if Opt('show_ledger') then
 		DrawLedger()
 	end
+	D.DrawGrips()
 	local cardH = 0
 	if Opt('show_card') then
 		cardH = DrawCard()
@@ -3487,6 +3495,76 @@ function widget:DrawWorld()
 	gl.Color(1, 1, 1, 1)
 end
 
+-- Resize grips: lower right of the cylinder's rim and the ledger's corner.
+function D.HudGrip()
+	local _, _, cx, cy = ChamberCentre(1)
+	local a = -pi/3 -- between chambers C and D
+	return cx + cos(a)*hud.radius*0.93, cy + sin(a)*hud.radius*0.93, 9*hud.scale
+end
+
+function D.LedgerGrip()
+	local x, y, w, h, k = LedgerRect()
+	return x + w - 16*k, y - h, x + w, y - h + 16*k
+end
+
+local function GripHit(x, y)
+	if Opt('show_ledger') then
+		local x1, y1, x2, y2 = D.LedgerGrip()
+		if x >= x1 and x <= x2 and y >= y1 and y <= y2 then
+			return 'ledger'
+		end
+	end
+	if Opt('show_hud') then
+		local gx, gy, gr = D.HudGrip()
+		if Dist2D(x, y, gx, gy) <= gr*1.3 then
+			return 'hud'
+		end
+	end
+	return nil
+end
+
+function D.DrawGrips()
+	local mx, my = Spring.GetMouseState()
+	local over = (dragging and dragging.resize) or GripHit(mx, my)
+	if Opt('show_hud') then
+		local gx, gy, gr = D.HudGrip()
+		local c = over == 'hud' and COLOR.ready or {0.42, 0.41, 0.5, 0.9}
+		D.Disc(gx, gy, gr, 20, {0.2, 0.2, 0.25, 0.97}, {0.12, 0.12, 0.15, 0.97})
+		D.Arc(gx, gy, gr - 1.5*hud.scale, gr, 1, 20, c)
+		gl.Color(c)
+		gl.LineWidth(1.5*hud.scale)
+		gl.BeginEnd(GL.LINES, function()
+			local d = gr*0.45
+			gl.Vertex(gx - d, gy + d); gl.Vertex(gx + d, gy - d)
+			gl.Vertex(gx + d, gy - d); gl.Vertex(gx + d*0.1, gy - d)
+			gl.Vertex(gx + d, gy - d); gl.Vertex(gx + d, gy - d*0.1)
+		end)
+		gl.LineWidth(1)
+	end
+	if Opt('show_ledger') then
+		local x1, y1, x2, y2 = D.LedgerGrip()
+		gl.Color(over == 'ledger' and COLOR.ready or {0.5, 0.49, 0.58, 0.9})
+		gl.LineWidth(1.5)
+		gl.BeginEnd(GL.LINES, function()
+			for i = 1, 3 do
+				local d = (x2 - x1)*i/4
+				gl.Vertex(x2 - 3 - d, y1 + 3); gl.Vertex(x2 - 3, y1 + 3 + d)
+			end
+		end)
+		gl.LineWidth(1)
+	end
+	gl.Color(1, 1, 1, 1)
+end
+
+-- Stored positions follow what is on screen, so a panel pushed against an edge moves back at once.
+function D.SettlePositions()
+	local vsx, vsy = Spring.GetViewGeometry()
+	local _, _, cx, cy = ChamberCentre(1)
+	hud.fx, hud.fy = cx/vsx, cy/vsy
+	local lx, ly = LedgerRect()
+	ledgerPanel.fx, ledgerPanel.fy = lx/vsx, ly/vsy
+end
+
 local function LedgerHit(x, y)
 	if not Opt('show_ledger') then
 		return false
@@ -3504,6 +3582,9 @@ local function HudHit(x, y)
 end
 
 function widget:IsAbove(x, y)
+	if GripHit(x, y) then
+		return true
+	end
 	if menuOpen then
 		local _, mx, top, w, h = MenuLayout()
 		if x >= mx and x <= mx + w and y <= top and y >= top - h then
@@ -3575,6 +3656,16 @@ function widget:MousePress(x, y, button)
 	if menuOpen and MenuClick(x, y) then
 		return true
 	end
+	D.SettlePositions()
+	local grip = GripHit(x, y)
+	if grip then
+		local _, _, cx, cy = ChamberCentre(1)
+		local lx, _, lw = LedgerRect()
+		dragging = {resize = grip, x0 = x, y0 = y, moved = true, onClick = function() end,
+			size0 = options[grip == 'hud' and 'hud_size' or 'ledger_size'].value,
+			span0 = grip == 'hud' and max(1, Dist2D(x, y, cx, cy)) or max(1, x - lx), cx = cx, cy = cy, lx = lx}
+		return true
+	end
 	-- Press on a panel: a drag moves it, a click (no drag) acts on release.
 	if LedgerHit(x, y) then
 		local _, ly, _, _, k = LedgerRect()
@@ -3594,6 +3685,18 @@ function widget:MousePress(x, y, button)
 end
 
 function widget:MouseMove(x, y)
+	if dragging and dragging.resize then
+		-- Size follows the grip: distance from the cylinder's centre, or the ledger's width.
+		local key = dragging.resize == 'hud' and 'hud_size' or 'ledger_size'
+		local span = dragging.resize == 'hud' and Dist2D(x, y, dragging.cx, dragging.cy) or (x - dragging.lx)
+		local option = options[key]
+		local size = floor(dragging.size0*span/dragging.span0/5 + 0.5)*5
+		size = max(option.min, min(option.max, size))
+		if size ~= option.value then
+			option.value = size
+		end
+		return
+	end
 	if dragging then
 		local dx, dy = x - dragging.x0, y - dragging.y0
 		if dragging.moved or dx*dx + dy*dy > 36 then
@@ -3617,6 +3720,11 @@ function widget:MouseRelease(x, y, button)
 		widget:MouseMove(x, y)
 		local d = dragging
 		dragging = nil
+		if d.resize then
+			local key = d.resize == 'hud' and 'hud_size' or 'ledger_size'
+			SetOption(key, options[key].value) -- saved with the settings
+		end
+		D.SettlePositions()
 		if not d.moved then
 			d.onClick()
 		end
@@ -3639,21 +3747,6 @@ function widget:MouseRelease(x, y, button)
 	return true
 end
 
--- Mouse wheel over a panel resizes it.
-function widget:MouseWheel(up, value)
-	local x, y = Spring.GetMouseState()
-	local key
-	if LedgerHit(x, y) then
-		key = 'ledger_size'
-	elseif HudHit(x, y) then
-		key = 'hud_size'
-	else
-		return false
-	end
-	local option = options[key]
-	SetOption(key, max(option.min, min(option.max, option.value + (up and option.step or -option.step))))
-	return true
-end
 
 function widget:GetTooltip(x, y)
 	for w = 1, WING_COUNT do
@@ -3667,21 +3760,26 @@ function widget:GetTooltip(x, y)
 				text = text .. string.format("\nReady in %ds: flight %ds, pad queue %ds, rearm %ds, repair %ds.",
 					ceil(eta), ceil(parts.flight), ceil(parts.wait), ceil(parts.rearm), ceil(parts.repair))
 			end
-			return text .. "\nClick to select, Shift-click to add, double-click to view. Drag to move, wheel to resize."
+			return text .. "\nClick to select, Shift-click to add, double-click to view. Drag to move, drag the grip to resize."
 		end
 	end
 	if menuOpen then
 		return "Click a feature to switch it on or off."
 	end
-	if LedgerHit(x, y) then
-		return "Revolver ledger. Click the title bar to switch views. Drag to move, wheel to resize."
+	local grip = GripHit(x, y)
+	if grip then
+		return "Drag to resize the " .. (grip == 'hud' and "cylinder" or "ledger") .. "."
 	end
-	return "Revolver. Click the middle for the feature menu. Drag to move, wheel to resize."
+	if LedgerHit(x, y) then
+		return "Revolver ledger. Click the title bar to switch views. Drag to move, drag the grip to resize."
+	end
+	return "Revolver. Click the middle for the feature menu. Drag to move, drag the grip to resize."
 end
 
 widget.RevolverMenuLayout = MenuLayout
 widget.RevolverLedgerRect = LedgerRect
 widget.RevolverChamberCentre = ChamberCentre
+widget.RevolverGrips = function() local hx, hy, hr = D.HudGrip() local x1, y1, x2, y2 = D.LedgerGrip() return hx, hy, hr, x1, y1, x2, y2 end
 widget.RevolverPath = function() UpdatePathView() return view.path end
 
 end -- Drawing
