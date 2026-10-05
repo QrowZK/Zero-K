@@ -164,8 +164,12 @@ end
 --------------------------------------------------------------------------------
 -- Options
 
-local hud = {x = 160, y = 220, radius = 92, chamber = 30}
-local ledgerPanel = {x = 20, y = 260, w = 380, h = 220}
+-- Positions are fractions of the screen so they survive resolution changes. Both panels can be dragged.
+local HUD_DEFAULT = {fx = 1 - 160/1920, fy = 220/1080}
+local LEDGER_DEFAULT = {fx = 20/1920, fy = 1 - 260/1080}
+local hud = {fx = HUD_DEFAULT.fx, fy = HUD_DEFAULT.fy, radius = 92, chamber = 30}
+local ledgerPanel = {fx = LEDGER_DEFAULT.fx, fy = LEDGER_DEFAULT.fy, w = 380, h = 220}
+local dragging -- panel being dragged or clicked: {what, x0, y0, fx0, fy0, moved, onClick}
 
 local Fire, Mark, ClearMarks, Recall, SelectWing, SelectReady, SetApproach, PoolPartial, ToggleCalibration
 local ToggleMenu, AssignSelected
@@ -200,7 +204,7 @@ options_order = {
 	-- Ledger
 	'ledger_tracking', 'show_ledger', 'ledger_view', 'career_history', 'export_csv',
 	-- Grip
-	'sounds', 'open_menu', 'fire', 'mark', 'clear_marks', 'recall', 'select_ready',
+	'sounds', 'reset_positions', 'open_menu', 'fire', 'mark', 'clear_marks', 'recall', 'select_ready',
 	'select_1', 'select_2', 'select_3', 'select_4', 'select_5', 'select_6',
 	'assign_1', 'assign_2', 'assign_3', 'assign_4', 'assign_5', 'assign_6',
 	'approach', 'pool', 'calibrate',
@@ -292,6 +296,10 @@ options = {
 
 	-- Grip
 	sounds = Switch('Sounds', nil, true, PATH.grip),
+	reset_positions = {name = 'Reset cylinder and ledger positions', type = 'button', path = PATH.grip, OnChange = function()
+		hud.fx, hud.fy = HUD_DEFAULT.fx, HUD_DEFAULT.fy
+		ledgerPanel.fx, ledgerPanel.fy = LEDGER_DEFAULT.fx, LEDGER_DEFAULT.fy
+	end},
 	open_menu = {name = 'Open Revolver menu', desc = 'Switch Revolver features on and off. Also opens from the middle of the cylinder.', type = 'button', path = PATH.grip, OnChange = function() ToggleMenu() end},
 	fire = {name = 'Fire', desc = 'Send chambered Magpies at the marked targets, or the enemy under the cursor.', type = 'button', path = PATH.grip, OnChange = function() Fire() end},
 	mark = {name = 'Mark target', desc = 'Add the enemy under the cursor to the target list.', type = 'button', path = PATH.grip, OnChange = function() Mark() end},
@@ -2203,6 +2211,22 @@ function widget:Initialize()
 	}
 end
 
+function widget:GetConfigData()
+	return {hudX = hud.fx, hudY = hud.fy, ledgerX = ledgerPanel.fx, ledgerY = ledgerPanel.fy}
+end
+
+function widget:SetConfigData(data)
+	if type(data) ~= "table" then
+		return
+	end
+	local function Fraction(v, default)
+		v = tonumber(v)
+		return (v and v >= 0 and v <= 1) and v or default
+	end
+	hud.fx, hud.fy = Fraction(data.hudX, HUD_DEFAULT.fx), Fraction(data.hudY, HUD_DEFAULT.fy)
+	ledgerPanel.fx, ledgerPanel.fy = Fraction(data.ledgerX, LEDGER_DEFAULT.fx), Fraction(data.ledgerY, LEDGER_DEFAULT.fy)
+end
+
 function widget:Shutdown()
 	CloseRuns()
 	Export()
@@ -2246,7 +2270,8 @@ local COLOR = {
 
 local function ChamberCentre(w)
 	local vsx = Spring.GetViewGeometry()
-	local cx, cy = vsx - hud.x, hud.y
+	local _, vsy = Spring.GetViewGeometry()
+	local cx, cy = vsx*hud.fx, vsy*hud.fy
 	local angle = pi/2 - (w - 1)*pi/3
 	return cx + cos(angle)*(hud.radius - hud.chamber - 4), cy + sin(angle)*(hud.radius - hud.chamber - 4), cx, cy
 end
@@ -2387,9 +2412,9 @@ local function DrawCard()
 end
 
 local function LedgerRect()
-	local _, vsy = Spring.GetViewGeometry()
+	local vsx, vsy = Spring.GetViewGeometry()
 	local h = ledgerPanel.h + (Opt('fleet_advisor') and 70 or 0)
-	return ledgerPanel.x, vsy - ledgerPanel.y, ledgerPanel.w, h
+	return vsx*ledgerPanel.fx, vsy*ledgerPanel.fy, ledgerPanel.w, h
 end
 
 local function DrawLedger()
@@ -2744,6 +2769,29 @@ function widget:IsAbove(x, y)
 	return Dist2D(x, y, cx, cy) <= hud.radius
 end
 
+local function HudClick(x, y)
+	local _, _, cx, cy = ChamberCentre(1)
+	if Dist2D(x, y, cx, cy) <= 16 then
+		ToggleMenu()
+		return
+	end
+	for w = 1, WING_COUNT do
+		local chx, chy = ChamberCentre(w)
+		if Dist2D(x, y, chx, chy) <= hud.chamber then
+			local list = SelectWing(w)
+			local now = frame
+			if lastClick.wing == w and now - lastClick.time < 12 then
+				local wx, wz = Centroid(list)
+				if wx then
+					Spring.SetCameraTarget(wx, spGetGroundHeight(wx, wz) or 0, wz)
+				end
+			end
+			lastClick.wing, lastClick.time = w, now
+			return
+		end
+	end
+end
+
 local function GroundAt(x, y)
 	local kind, pos = spTraceScreenRay(x, y, true)
 	if kind == "ground" and pos then
@@ -2772,40 +2820,35 @@ function widget:MousePress(x, y, button)
 	if menuOpen and MenuClick(x, y) then
 		return true
 	end
+	-- Press on a panel: a drag moves it, a click (no drag) acts on release.
 	if LedgerHit(x, y) then
-		local lx, ly = LedgerRect()
-		if y >= ly - 24 then
-			SetOption('ledger_view', NextOptionValue('ledger_view'))
-		end
+		local _, ly = LedgerRect()
+		dragging = {what = ledgerPanel, x0 = x, y0 = y, fx0 = ledgerPanel.fx, fy0 = ledgerPanel.fy,
+			onClick = function()
+				if y >= ly - 24 then
+					SetOption('ledger_view', NextOptionValue('ledger_view'))
+				end
+			end}
 		return true
 	end
 	if not (Opt('show_hud') and widget:IsAbove(x, y)) then
 		return false
 	end
-	local _, _, cx, cy = ChamberCentre(1)
-	if Dist2D(x, y, cx, cy) <= 16 then
-		ToggleMenu()
-		return true
-	end
-	for w = 1, WING_COUNT do
-		local chx, chy = ChamberCentre(w)
-		if Dist2D(x, y, chx, chy) <= hud.chamber then
-			local list = SelectWing(w)
-			local now = frame
-			if lastClick.wing == w and now - lastClick.time < 12 then
-				local wx, wz = Centroid(list)
-				if wx then
-					Spring.SetCameraTarget(wx, spGetGroundHeight(wx, wz) or 0, wz)
-				end
-			end
-			lastClick.wing, lastClick.time = w, now
-			return true
-		end
-	end
+	dragging = {what = hud, x0 = x, y0 = y, fx0 = hud.fx, fy0 = hud.fy, onClick = function() HudClick(x, y) end}
 	return true
 end
 
 function widget:MouseMove(x, y)
+	if dragging then
+		local dx, dy = x - dragging.x0, y - dragging.y0
+		if dragging.moved or dx*dx + dy*dy > 36 then
+			dragging.moved = true
+			local vsx, vsy = Spring.GetViewGeometry()
+			dragging.what.fx = max(0, min(1, dragging.fx0 + dx/vsx))
+			dragging.what.fy = max(0, min(1, dragging.fy0 + dy/vsy))
+		end
+		return
+	end
 	if approachDrag then
 		local gx, gz = GroundAt(x, y)
 		if gx then
@@ -2815,6 +2858,15 @@ function widget:MouseMove(x, y)
 end
 
 function widget:MouseRelease(x, y, button)
+	if dragging then
+		widget:MouseMove(x, y)
+		local d = dragging
+		dragging = nil
+		if not d.moved then
+			d.onClick()
+		end
+		return true
+	end
 	if not approachDrag then
 		return false
 	end
