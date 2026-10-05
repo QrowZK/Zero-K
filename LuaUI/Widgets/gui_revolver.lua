@@ -23,7 +23,7 @@ local floor, ceil, sqrt, min, max = math.floor, math.ceil, math.sqrt, math.min, 
 local pi, cos, sin = math.pi, math.cos, math.sin
 
 local customCmds = VFS.Include("LuaRules/Configs/customcmds.lua")
--- Commands and fire states (a table: the main chunk is near Lua's 200-local limit)
+-- Commands and fire states, plus a few helpers (a table: the main chunk is near Lua's 200-local limit)
 local C = {
 	ATTACK = CMD.ATTACK, MOVE = CMD.MOVE, FIRE_STATE = CMD.FIRE_STATE, OPT_SHIFT = CMD.OPT_SHIFT,
 	REARM = customCmds.REARM, FIND_PAD = customCmds.FIND_PAD, RETREAT = customCmds.RETREAT,
@@ -458,6 +458,9 @@ local function ClassifyState(mag)
 	end
 	if mag.group then
 		return "attacking"
+	end
+	if mag.homeFrame then
+		return "returning"
 	end
 	local cmdID = Spring.GetUnitCurrentCommand(mag.unitID)
 	if cmdID == C.REARM or cmdID == C.FIND_PAD then
@@ -1604,8 +1607,9 @@ local function SendHome(list)
 		if noAmmo == 0 then
 			local padID = next(pads) and ChoosePad(unitID)
 			if padID then
-				if magpies[unitID] then
-					magpies[unitID].pad = padID
+				local mag = magpies[unitID]
+				if mag then
+					mag.pad, mag.homeFrame, mag.homeTries = padID, frame, 0
 				end
 				Spring.GiveOrderToUnit(unitID, CMD.STOP, {}, 0)
 				Spring.GiveOrderToUnit(unitID, C.REARM, {padID}, C.OPT_SHIFT)
@@ -1619,6 +1623,41 @@ local function SendHome(list)
 		Alert(stranded .. " Magpies have no pad to land on.", "nopad")
 	end
 	return sent
+end
+
+-- A Magpie sent home must be on its way within 1.5 s. If its landing order was dropped, send it again,
+-- then fall back to flying it over the pad, and say so in the console.
+function C.CheckHome(unitID, mag)
+	if mag.noAmmo ~= 0 or mag.group then
+		mag.homeFrame = nil
+		return
+	end
+	if frame - mag.homeFrame < 45 then
+		return
+	end
+	local cmdID = Spring.GetUnitCurrentCommand(unitID)
+	if cmdID == C.REARM or cmdID == CMD.MOVE then
+		return -- on its way
+	end
+	local padID = (mag.pad and pads[mag.pad]) and mag.pad or (next(pads) and ChoosePad(unitID))
+	mag.homeTries = (mag.homeTries or 0) + 1
+	mag.homeFrame = frame
+	if padID and mag.homeTries <= 2 then
+		Spring.Echo("Revolver: landing order for Magpie " .. unitID .. " was dropped (now " .. tostring(cmdID) .. "), sending it again.")
+		mag.pad = padID
+		Spring.GiveOrderToUnit(unitID, CMD.STOP, {}, 0)
+		Spring.GiveOrderToUnit(unitID, C.REARM, {padID}, C.OPT_SHIFT)
+	else
+		local px, py, pz
+		if padID then
+			px, py, pz = Spring.GetUnitPosition(padID)
+		end
+		mag.homeFrame = nil
+		if px then
+			Alert("A pad would not take some Magpies; flying them back over it instead.", "padrefused")
+			Spring.GiveOrderToUnit(unitID, CMD.MOVE, {px, py, pz}, 0)
+		end
+	end
 end
 
 local function ReleaseGroup(group, home)
@@ -2050,6 +2089,9 @@ local function UpdateMagpie(unitID, mag)
 		end
 	end
 
+	if mag.homeFrame then
+		C.CheckHome(unitID, mag)
+	end
 	mag.state = ClassifyState(mag)
 end
 
