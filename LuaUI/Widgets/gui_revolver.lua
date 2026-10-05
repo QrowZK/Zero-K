@@ -117,6 +117,7 @@ for unitDefID = 1, #UnitDefs do
 	local ud = UnitDefs[unitDefID]
 	local dps, range = 0, 0
 	local longReload = false
+	local stockShot = false
 	if ud.weapons then
 		for i = 1, #ud.weapons do
 			local weapon = ud.weapons[i]
@@ -128,6 +129,9 @@ for unitDefID = 1, #UnitDefs do
 					local reload = max(wd.reload or 1, 1/30)
 					dps = dps + damage*shots/reload
 					range = max(range, wd.range or 0)
+					if wd.stockpile then
+						stockShot = damage*shots
+					end
 					if reload >= 6 then
 						longReload = max(longReload or 0, reload)
 					end
@@ -143,7 +147,13 @@ for unitDefID = 1, #UnitDefs do
 			static = ud.isImmobile,
 			reload = longReload,
 			name = ud.humanName or ud.name,
+			-- Stockpiled weapons: seconds per missile and damage per missile.
+			stockTime = stockShot and tonumber(ud.customParams.stockpiletime) or nil,
+			stockShot = stockShot or nil,
 		}
+		if aaDefs[unitDefID].stockTime then
+			aaDefs[unitDefID].dps = 0 -- its damage comes from the stockpile, counted per missile
+		end
 		if ud.canFly then
 			fighterDefs[unitDefID] = true
 		end
@@ -186,7 +196,7 @@ options_order = {
 	-- Trigger
 	'hold_fire', 'release_near_target', 'time_on_target', 'staging_distance', 'rotate_fire',
 	-- Radar
-	'threat_map', 'route_lines', 'stale_intel', 'stale_seconds', 'route_alert', 'fighter_alert', 'fighter_pullback', 'reload_tracking',
+	'threat_map', 'route_lines', 'stale_intel', 'stale_seconds', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'stockpile_speed', 'stockpile_cap', 'reload_tracking',
 	-- Ledger
 	'ledger_tracking', 'show_ledger', 'ledger_view', 'career_history', 'export_csv',
 	-- Grip
@@ -262,6 +272,9 @@ options = {
 	route_alert = Switch('Alert on new AA along a route', nil, true, PATH.radar),
 	fighter_alert = Switch('Fighter alerts', nil, true, PATH.radar),
 	fighter_pullback = Switch('Pull wings back from fighters', nil, false, PATH.radar),
+	stockpile_watch = Switch('Estimate enemy stockpiles', 'Counts missiles an Artemis has likely built since you saw it, and shows build ETAs for anti-air under construction.', true, PATH.radar),
+	stockpile_speed = {name = 'Enemy stockpile speed (%)', desc = 'Lower this if the enemy is short on metal or energy.', type = 'number', value = 100, min = 10, max = 100, step = 5, path = PATH.radar},
+	stockpile_cap = {name = 'Most missiles to assume', type = 'number', value = 30, min = 1, max = 100, step = 1, path = PATH.radar},
 	reload_tracking = Switch('Track long AA reloads', 'Shows when a Hacksaw or other long-reload AA that shot your Magpies is reloading.', true, PATH.radar),
 
 	-- Ledger
@@ -301,7 +314,7 @@ local MENU = {
 	{title = 'Reload', keys = {'pad_balance', 'retreat_state'}},
 	{title = 'Sights', keys = {'show_card', 'live_correction', 'allocate', 'horizon', 'auto_style', 'slow_chain', 'kill_confirm'}},
 	{title = 'Trigger', keys = {'hold_fire', 'release_near_target', 'time_on_target', 'rotate_fire'}},
-	{title = 'Radar', keys = {'threat_map', 'route_lines', 'stale_intel', 'route_alert', 'fighter_alert', 'fighter_pullback', 'reload_tracking'}},
+	{title = 'Radar', keys = {'threat_map', 'route_lines', 'stale_intel', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'reload_tracking'}},
 	{title = 'Ledger', keys = {'ledger_tracking', 'show_ledger', 'ledger_view', 'career_history', 'export_csv'}},
 	{title = 'Grip', keys = {'sounds'}},
 }
@@ -705,7 +718,103 @@ local function AddThreat(unitID, defID)
 	t.fighter = fighterDefs[defID]
 	t.inLos = true
 	t.lastSeen = frame
+
+	-- Construction: watch progress to estimate when it finishes.
+	local _, _, _, _, progress = spGetUnitHealth(unitID)
+	progress = progress or 1
+	if progress < 1 then
+		if t.progress and frame > t.progressFrame and progress > t.progress then
+			t.rate = (progress - t.progress)/(frame - t.progressFrame)
+		end
+		t.building, t.progress, t.progressFrame = true, progress, frame
+	elseif t.building or isNew then
+		-- Seen finishing: the stockpile count is exact. Already built when first seen: it is a lower bound.
+		t.exact = (t.building == true)
+		t.building, t.progress, t.rate = false, 1, nil
+		t.stock0, t.t0 = 0, frame
+	end
 	return isNew
+end
+
+-- Frame when a structure under construction should finish, or nil if unknown.
+local function FinishFrame(t)
+	if not (t.building and t.rate and t.rate > 0) then
+		return nil
+	end
+	return t.progressFrame + (1 - t.progress)/t.rate
+end
+
+-- Missiles an enemy stockpiler probably holds: count, seconds to the next one, and whether the count is exact.
+local function StockEstimate(t)
+	local def = aaDefs[t.defID]
+	if not (def and def.stockTime) or t.building or not t.t0 then
+		return nil
+	end
+	local period = def.stockTime*30*100/max(1, Opt('stockpile_speed'))
+	local elapsed = frame - t.t0
+	local stock = t.stock0 + floor(elapsed/period)
+	local cap = Opt('stockpile_cap')
+	if stock >= cap then
+		return cap, nil, t.exact
+	end
+	return stock, (period - elapsed % period)/30, t.exact
+end
+
+-- A stockpiler fired: one missile fewer, keeping progress on the next.
+local function ConsumeMissile(t)
+	if t.lastShot and frame - t.lastShot < 30 then
+		return -- several hits from one missile
+	end
+	t.lastShot = frame
+	local def = aaDefs[t.defID]
+	local stock = StockEstimate(t)
+	if not stock then
+		return
+	end
+	local period = def.stockTime*30*100/max(1, Opt('stockpile_speed'))
+	if stock > 0 then
+		t.stock0 = stock - 1
+		t.t0 = frame - (frame - t.t0) % period
+	else
+		-- It had one we did not count: restart from now.
+		t.stock0, t.t0 = 0, frame
+	end
+end
+
+-- Map label for a threat: missiles and next ETA for stockpilers, ETA for construction.
+local function ThreatLabel(t)
+	local def = aaDefs[t.defID]
+	if t.building then
+		local finish = FinishFrame(t)
+		if finish then
+			return string.format("%s %d%%, done in %ds", def.name, floor(t.progress*100), max(0, ceil((finish - frame)/30)))
+		end
+		return string.format("%s %d%% built", def.name, floor(t.progress*100))
+	end
+	local stock, nextIn, exact = StockEstimate(t)
+	if stock then
+		local count = (exact and "" or "at least ") .. stock .. (stock == 1 and " missile" or " missiles")
+		if nextIn then
+			return string.format("%s: %s, next in %ds", def.name, count, ceil(nextIn))
+		end
+		return def.name .. ": " .. count
+	end
+	return nil
+end
+
+-- Stockpiled missiles that can reach a point: total and whether every count is exact.
+local function MissilesCovering(x, z)
+	local total, exact, n = 0, true, 0
+	for _, t in pairs(threats) do
+		if aaDefs[t.defID].stockTime and Dist2D(x, z, t.x, t.z) <= t.range then
+			local stock, _, isExact = StockEstimate(t)
+			if stock then
+				total, n = total + stock, n + 1
+				exact = exact and isExact
+			end
+		end
+	end
+	return total, exact, n
 end
 
 -- Expected damage to one Magpie flying a straight line through known AA.
@@ -714,12 +823,18 @@ local function RouteRisk(x1, z1, x2, z2)
 	local steps = max(1, ceil(length/50))
 	local dt = (length/steps)/magpieStats.speed
 	local damage = 0
+	local missiles = {}
 	for i = 0, steps do
 		local f = i/steps
 		local x, z = x1 + (x2 - x1)*f, z1 + (z2 - z1)*f
-		for _, t in pairs(threats) do
-			if not t.fighter and Dist2D(x, z, t.x, t.z) <= t.range then
+		for unitID, t in pairs(threats) do
+			if not t.fighter and not t.building and Dist2D(x, z, t.x, t.z) <= t.range then
 				damage = damage + t.dps*dt
+				if aaDefs[t.defID].stockTime and not missiles[unitID] then
+					missiles[unitID] = true
+					local stock = StockEstimate(t) or 0
+					damage = damage + min(stock, 1)*aaDefs[t.defID].stockShot
+				end
 			end
 		end
 	end
@@ -1726,12 +1841,16 @@ local function UpdateThreats()
 	for unitID, t in pairs(threats) do
 		local defID = spValidUnitID(unitID) and spGetUnitDefID(unitID)
 		if defID then
-			local x, y, z = spGetUnitPosition(unitID)
-			if x then
-				t.x, t.y, t.z, t.inLos, t.lastSeen = x, y, z, true, frame
-			end
+			AddThreat(unitID, defID)
 		else
 			t.inLos = false
+			local finish = FinishFrame(t)
+			if finish and frame >= finish then
+				-- Out of sight but should be finished by now.
+				t.building, t.progress, t.rate = false, 1, nil
+				t.stock0, t.t0, t.exact = 0, floor(finish), true
+				Alert(aaDefs[t.defID].name .. " under construction is probably finished.", "built" .. unitID)
+			end
 			if not t.static then
 				if frame - t.lastSeen > 30*20 then
 					threats[unitID] = nil
@@ -1882,6 +2001,10 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 			lastHit[unitID] = {run = run, frame = frame}
 		end
 		return
+	end
+	local shooter = attackerID and threats[attackerID]
+	if shooter and aaDefs[shooter.defID].stockTime then
+		ConsumeMissile(shooter)
 	end
 	-- Something shot one of our Magpies: note long reloads.
 	if magpies[unitID] and attackerID and attackerDefID and aaDefs[attackerDefID] and aaDefs[attackerDefID].reload then
@@ -2223,8 +2346,15 @@ function CardLines(target)
 		(lost and lost > 0) and (", lose " .. lost) or "", source == "table" and "Magpie Manual" or "estimate",
 		slow > 0.01 and string.format(", slowed %d%%", floor(slow*100)) or "")
 
-	local pool = ReadyPool()
 	local tx, _, tz = spGetUnitPosition(target)
+	if Opt('stockpile_watch') and tx then
+		local missiles, exact, n = MissilesCovering(tx, tz)
+		if n > 0 then
+			lines[#lines + 1] = string.format("Covered by %d stockpiler%s: %s%d missiles ready", n, n == 1 and "" or "s",
+				exact and "" or "at least ", missiles)
+		end
+	end
+	local pool = ReadyPool()
 	local cx, cz = Centroid(pool)
 	if cx and tx then
 		local risk = RouteRisk(cx, cz, tx, tz)
@@ -2454,7 +2584,15 @@ function widget:DrawWorldPreUnit()
 			if not t.fighter then
 				-- Redder the faster it kills a Magpie.
 				local danger = max(0, min(1, 1 - t.ttk/15))
-				gl.Color(1, 0.75 - 0.6*danger, 0.3, t.inLos and 0.55 or 0.25)
+				local stock = StockEstimate(t)
+				if stock then
+					danger = (stock > 0) and 1 or 0.2
+				end
+				local alpha = t.inLos and 0.55 or 0.25
+				if t.building then
+					alpha = 0.12 -- not a threat yet
+				end
+				gl.Color(1, 0.75 - 0.6*danger, 0.3, alpha)
 				gl.DrawGroundCircle(t.x, t.y, t.z, t.range, 48)
 			end
 		end
@@ -2544,6 +2682,19 @@ function widget:DrawWorld()
 			gl.Color(COLOR.attacking)
 			gl.Text(tostring(i), 0, 0, 20, "cv")
 			gl.PopMatrix()
+		end
+	end
+	if Opt('threat_map') and Opt('stockpile_watch') then
+		for _, t in pairs(threats) do
+			local text = ThreatLabel(t)
+			if text then
+				gl.PushMatrix()
+				gl.Translate(t.x, t.y + 120, t.z)
+				gl.Billboard()
+				gl.Color(t.building and COLOR.muted or COLOR.returning)
+				gl.Text(text, 0, 0, 14, "cv")
+				gl.PopMatrix()
+			end
 		end
 	end
 	if Opt('reload_tracking') then
@@ -2735,5 +2886,6 @@ widget.RevolverInternals = {
 	menuOpen = function() return menuOpen end, approachMode = function() return approachMode end,
 	routes = function() return routeCache end, losMemory = function() return losMemory end,
 	StaleCells = StaleCells, CellAge = CellAge, SweepLos = SweepLos, FleetAdvice = FleetAdvice, TargetTable = TargetTable,
+	StockEstimate = StockEstimate, ThreatLabel = ThreatLabel, MissilesCovering = MissilesCovering, FinishFrame = FinishFrame,
 	WholeWings = WholeWings, SetOption = SetOption, NextOptionValue = NextOptionValue, UpdateRoutes = UpdateRoutes,
 }
