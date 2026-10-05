@@ -4,10 +4,10 @@
 function widget:GetInfo()
 	return {
 		name      = "Revolver",
-		desc      = "Fleet manager for Magpies. Groups them into six wings, shows how many each target needs, keeps shots for ordered targets, balances pads, maps enemy anti-air and records every sortie.",
+		desc      = "Fleet manager for Magpies. Groups them into six wings, shows how many each target needs, keeps shots for ordered targets, balances pads, maps enemy anti-air, records every sortie, tells allies about attacks and lists their !air requests.",
 		author    = "QrowZK",
 		date      = "October 2026",
-		version   = "2026-10-05e",
+		version   = "2026-10-05f",
 		license   = "GNU GPL, v2 or later",
 		layer     = 10,
 		enabled   = false,
@@ -153,6 +153,17 @@ local ledgerPanel = {fx = LEDGER_DEFAULT.fx, fy = LEDGER_DEFAULT.fy, w = 380, h 
 local menuPanel = {fx = 0.5, fy = 0.5} -- centre of the feature menu; dragged by its title bar
 local dragging -- panel being dragged or clicked: {what, x0, y0, fx0, fy0, moved, onClick}
 
+-- Allies: attack notices in ally chat and the !air request panel (one table: the main chunk is near Lua's 200-local limit)
+local Allies = {
+	DEFAULT = {fx = 1295/1920, fy = 400/1080}, -- request panel's top left corner, left of the cylinder
+	requests = {}, -- newest first: {pid, name, team, note, x, z, where, source, frame, answered}
+	pending = {},  -- target unitID -> {n, name, x, z, frame, req}: attacks not posted yet
+	reported = {}, -- target unitID -> frame it was last posted
+	hurt = {},     -- allied teamID -> {x, z, frame}: where its units were last hit
+	lastSent = -10000,
+}
+Allies.panel = {fx = Allies.DEFAULT.fx, fy = Allies.DEFAULT.fy}
+
 local AimOf, Watch
 local Fire, Mark, ClearMarks, Recall, SelectWing, SelectReady, SetApproach, PoolPartial, ToggleCalibration
 local ToggleMenu, AssignSelected, ResetSizes
@@ -165,6 +176,7 @@ local PATH = {
 	trigger  = ROOT .. '/Trigger',
 	radar    = ROOT .. '/Radar',
 	ledger   = ROOT .. '/Ledger',
+	allies   = ROOT .. '/Allies',
 	grip     = ROOT .. '/Grip',
 }
 
@@ -186,6 +198,8 @@ options_order = {
 	'threat_map', 'threat_style', 'path_card', 'route_lines', 'stale_intel', 'stale_seconds', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'stockpile_speed', 'stockpile_cap', 'reload_tracking',
 	-- Ledger
 	'ledger_tracking', 'show_ledger', 'ledger_size', 'ledger_view', 'career_history', 'export_csv',
+	-- Allies
+	'ally_notify', 'air_requests', 'request_minutes',
 	-- Grip
 	'sounds', 'reset_positions', 'open_menu', 'fire', 'mark', 'clear_marks', 'recall', 'select_ready',
 	'select_1', 'select_2', 'select_3', 'select_4', 'select_5', 'select_6',
@@ -294,12 +308,26 @@ options = {
 	career_history = Switch('Career history', 'Keep a summary of every game and show the trend.', true, PATH.ledger),
 	export_csv = Switch('Save sorties to file', 'Writes LuaUI/Config/Revolver/*.csv at the end of the game.', true, PATH.ledger),
 
+	-- Allies
+	ally_notify = {
+		name = 'Tell allies about Magpie attacks', type = 'radioButton', value = 'off', path = PATH.allies,
+		desc = 'Posts in ally chat how many Magpies are attacking what, and roughly where: at most one line every 8 seconds, and each target once in 30 seconds. With map ping, the biggest attack is also marked on the map.',
+		items = {
+			{key = 'off', name = 'Off'},
+			{key = 'chat', name = 'Ally chat'},
+			{key = 'ping', name = 'Ally chat and map ping'},
+		},
+	},
+	air_requests = Switch('List !air requests from allies', 'Allies who type !air in chat, or put !air on a map point, are listed in a panel. Click a row to look there.', true, PATH.allies),
+	request_minutes = {name = 'Keep requests for (minutes)', type = 'number', value = 3, min = 1, max = 10, step = 1, path = PATH.allies},
+
 	-- Grip
 	sounds = Switch('Sounds', nil, true, PATH.grip),
-	reset_positions = {name = 'Reset cylinder and ledger positions and sizes', type = 'button', path = PATH.grip, OnChange = function()
+	reset_positions = {name = 'Reset panel positions and sizes', desc = 'The cylinder, ledger, menu and air request panel.', type = 'button', path = PATH.grip, OnChange = function()
 		hud.fx, hud.fy = HUD_DEFAULT.fx, HUD_DEFAULT.fy
 		ledgerPanel.fx, ledgerPanel.fy = LEDGER_DEFAULT.fx, LEDGER_DEFAULT.fy
 		menuPanel.fx, menuPanel.fy = 0.5, 0.5
+		Allies.panel.fx, Allies.panel.fy = Allies.DEFAULT.fx, Allies.DEFAULT.fy
 		ResetSizes()
 	end},
 	open_menu = {name = 'Open Revolver menu', desc = 'Switch Revolver features on and off. Also opens from the middle of the cylinder.', type = 'button', path = PATH.grip, OnChange = function() ToggleMenu() end},
@@ -326,6 +354,7 @@ local MENU = {
 	{title = 'Trigger', keys = {'hold_fire', 'release_near_target', 'time_on_target', 'rotate_fire'}},
 	{title = 'Radar', keys = {'threat_map', 'threat_style', 'path_card', 'route_lines', 'stale_intel', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'reload_tracking'}},
 	{title = 'Ledger', keys = {'ledger_tracking', 'show_ledger', 'ledger_view', 'career_history', 'export_csv'}},
+	{title = 'Allies', keys = {'ally_notify', 'air_requests'}},
 	{title = 'Grip', keys = {'sounds'}},
 }
 
@@ -435,6 +464,248 @@ local function IsAliveEnemy(unitID)
 	end
 	local allyTeam = Spring.GetUnitAllyTeam(unitID)
 	return allyTeam ~= nil and allyTeam ~= myAllyTeamID
+end
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Allies: attack notices in ally chat, and allies' !air requests
+
+-- Rough place on the map, by thirds: "north-west", "east", "mid".
+function Allies.Where(x, z)
+	local sizeX, sizeZ = Game.mapSizeX or 1, Game.mapSizeZ or 1
+	local ns = (z < sizeZ/3 and "north") or (z > sizeZ*2/3 and "south") or nil
+	local ew = (x < sizeX/3 and "west") or (x > sizeX*2/3 and "east") or nil
+	if ns and ew then
+		return ns .. "-" .. ew
+	end
+	return ns or ew or "mid"
+end
+
+function Allies.UnitName(unitID)
+	local defID = Spring.GetUnitDefID(unitID)
+	local ud = defID and UnitDefs[defID]
+	return ud and (ud.humanName or ud.name) or "a radar contact"
+end
+
+-- An attack answers the nearest request within 1600 elmos.
+function Allies.Answer(x, z)
+	local best, bestD
+	for i = 1, #Allies.requests do
+		local req = Allies.requests[i]
+		local d = Dist2D(x, z, req.x, req.z)
+		if d <= 1600 and (not bestD or d < bestD) then
+			best, bestD = req, d
+		end
+	end
+	if best and not best.answered then
+		best.answered = frame
+	end
+	return best
+end
+
+-- Magpies just sent at an enemy, by Fire, a retarget or a hand order: answer a request near it and
+-- queue a notice for ally chat.
+function Allies.Dispatch(target, n)
+	if not (n and n > 0) or not IsAliveEnemy(target) then
+		return
+	end
+	local x, _, z = Spring.GetUnitPosition(target)
+	if not x then
+		return
+	end
+	local req = Allies.Answer(x, z)
+	if Opt('ally_notify') == 'off' then
+		return
+	end
+	local p = Allies.pending[target]
+	if not p then
+		p = {n = 0, name = Allies.UnitName(target), x = x, z = z, frame = frame}
+		Allies.pending[target] = p
+	end
+	p.n = p.n + n
+	if req and req.pid ~= Spring.GetMyPlayerID() then
+		p.req = req.name
+	end
+end
+
+-- Post queued notices as one line, a moment after the first so a whole Fire goes together. At most one
+-- line every 8 s; a target posted in the last 30 s is left out.
+function Allies.Flush()
+	local first
+	for _, p in pairs(Allies.pending) do
+		first = min(first or p.frame, p.frame)
+	end
+	if not first or frame - first < 20 or frame - Allies.lastSent < 240 then
+		return
+	end
+	local list = {}
+	for target, p in pairs(Allies.pending) do
+		local seen = Allies.reported[target]
+		if not (seen and frame - seen < 900) then
+			p.target = target
+			list[#list + 1] = p
+		end
+	end
+	Allies.pending = {}
+	if #list == 0 or Opt('ally_notify') == 'off' then
+		return
+	end
+	table.sort(list, function(a, b)
+		if a.n ~= b.n then
+			return a.n > b.n
+		end
+		return a.target < b.target
+	end)
+	local parts = {}
+	for i = 1, #list do
+		local p = list[i]
+		Allies.reported[p.target] = frame
+		if i <= 3 then
+			parts[i] = p.n .. " on " .. p.name .. " (" .. Allies.Where(p.x, p.z) .. ")" .. (p.req and (" for " .. p.req) or "")
+		end
+	end
+	local more = #list - 3
+	local text = "Magpies: " .. table.concat(parts, ", ")
+	if more > 0 then
+		text = text .. " and " .. more .. (more == 1 and " more target" or " more targets")
+	end
+	Spring.SendCommands("say a:" .. text .. ".")
+	Allies.lastSent = frame
+	if Opt('ally_notify') == 'ping' then
+		local p = list[1]
+		Spring.MarkerAddPoint(p.x, Spring.GetGroundHeight(p.x, p.z) or 0, p.z, "Magpies: " .. p.n, false)
+	end
+end
+
+-- "!air" as a word, in any case.
+function Allies.HasAir(text)
+	return (" " .. text:lower() .. " "):find("[%s%p]!air[%s%p]") ~= nil
+end
+
+-- The player who sent a chat line, if they play on our side (ourselves too, so it can be tried alone).
+function Allies.Player(name)
+	local players = Spring.GetPlayerList() or {}
+	for i = 1, #players do
+		local playerName, _, spec, teamID, allyTeamID = Spring.GetPlayerInfo(players[i], false)
+		if playerName == name then
+			if spec or allyTeamID ~= myAllyTeamID then
+				return nil
+			end
+			return players[i], teamID
+		end
+	end
+	return nil
+end
+
+-- Where an ally's ground units were last hit, noted at most twice a second per team.
+function Allies.Hurt(unitID, teamID)
+	local h = Allies.hurt[teamID]
+	if h and frame - h.frame < 15 then
+		return
+	end
+	local x, _, z = Spring.GetUnitPosition(unitID)
+	if x then
+		Allies.hurt[teamID] = {x = x, z = z, frame = frame}
+	end
+end
+
+-- Best guess at where a chat request wants Magpies: where the player's units were hit in the last
+-- 20 s, else their commander, else the middle of their units.
+function Allies.Locate(teamID)
+	local h = Allies.hurt[teamID]
+	if h and frame - h.frame <= 600 then
+		return h.x, h.z, "under fire"
+	end
+	local units = Spring.GetTeamUnits(teamID) or {}
+	for i = 1, #units do
+		local defID = Spring.GetUnitDefID(units[i])
+		local cp = defID and UnitDefs[defID].customParams
+		if cp and (cp.commtype or cp.dynamic_comm) then
+			local x, _, z = Spring.GetUnitPosition(units[i])
+			if x then
+				return x, z, "commander"
+			end
+		end
+	end
+	local x, z = Centroid(units)
+	if x then
+		return x, z, "their units"
+	end
+	return nil
+end
+
+function Allies.Remove(playerID)
+	for i = #Allies.requests, 1, -1 do
+		if Allies.requests[i].pid == playerID then
+			table.remove(Allies.requests, i)
+		end
+	end
+end
+
+-- A new request replaces the player's earlier one. Map points give the place; chat requests are located.
+function Allies.Request(playerID, name, teamID, text, x, z)
+	local note = text:gsub("![Aa][Ii][Rr]", " "):gsub("%s+", " "):gsub("^[%s%p]+", ""):gsub("%s+$", "")
+	if #note > 28 then
+		note = note:sub(1, 25):gsub("[\192-\255][\128-\191]*$", "") .. "..."
+	end
+	local source = "map point"
+	if not x then
+		x, z, source = Allies.Locate(teamID)
+	end
+	if not x then
+		x, z, source = (Game.mapSizeX or 0)/2, (Game.mapSizeZ or 0)/2, "unknown"
+	end
+	Allies.Remove(playerID)
+	local req = {pid = playerID, name = name, team = teamID, note = note, x = x, z = z,
+		where = Allies.Where(x, z), source = source, frame = frame}
+	table.insert(Allies.requests, 1, req)
+	Allies.requests[13] = nil
+	local say = name .. " asks for air support (" .. req.where .. ")" .. (note ~= "" and (": " .. note) or "")
+	Alert(say .. (say:find("[%.!?]$") and "" or "."), "air" .. playerID, "sounds/beep4.wav")
+	return req
+end
+
+-- Chat lines read "<Name> Allies: text" (ally chat) or "<Name> text" (all chat). Chat to spectators,
+-- whispers and spectators' lines ("[Name] text") are left out.
+function Allies.Heard(line)
+	if not Opt('air_requests') or not line:lower():find("!air", 1, true) then
+		return
+	end
+	local name, text = line:match("^<([^>]+)> (.*)$")
+	if not name then
+		return
+	end
+	local channel = text:match("^(%a+): ")
+	if channel == "Spectators" or channel == "Private" then
+		return
+	elseif channel == "Allies" then
+		text = text:sub(9)
+	end
+	if Allies.HasAir(text) then
+		local playerID, teamID = Allies.Player(name)
+		if playerID then
+			Allies.Request(playerID, name, teamID, text)
+		end
+	end
+end
+
+-- Requests expire after the set time, or 30 s after Magpies answered them.
+function Allies.Update()
+	if not Opt('air_requests') then
+		Allies.requests = {}
+	end
+	local keep = Opt('request_minutes')*1800
+	for i = #Allies.requests, 1, -1 do
+		local req = Allies.requests[i]
+		if frame - req.frame > keep or (req.answered and frame - req.answered > 900) then
+			table.remove(Allies.requests, i)
+		end
+	end
+	for target, f in pairs(Allies.reported) do
+		if frame - f > 900 then
+			Allies.reported[target] = nil
+		end
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -1703,6 +1974,7 @@ local function Retarget(group, target)
 		SetMode(UnitList(group.units), group.mode)
 	end
 	OrderAttack(group)
+	Allies.Dispatch(target, #UnitList(group.units))
 end
 
 local function LaunchGroup(list, target, queue, mode, approach, rotate, direct)
@@ -1727,6 +1999,7 @@ local function LaunchGroup(list, target, queue, mode, approach, rotate, direct)
 	end
 	group.wing = w
 	groups[group.id] = group
+	Allies.Dispatch(target, #list)
 
 	local run = NewRun(w, {target}, mode, true)
 	run.magpies = #list
@@ -2096,6 +2369,9 @@ local function UpdateMagpie(unitID, mag)
 	if not mag.group and noAmmo == 0 then
 		local cmdID, _, _, p1, p2 = Spring.GetUnitCurrentCommand(unitID)
 		if cmdID == C.ATTACK and p1 and not p2 then
+			if mag.handTarget ~= p1 then
+				Allies.Dispatch(p1, 1)
+			end
 			mag.handTarget = p1
 		elseif cmdID then
 			mag.handTarget = nil
@@ -2379,6 +2655,9 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	if not Spring.AreTeamsAllied(unitTeam, myTeamID) then
 		return
 	end
+	if not (UnitDefs[unitDefID] and UnitDefs[unitDefID].canFly) then
+		Allies.Hurt(unitID, unitTeam)
+	end
 	local shooter = attackerID and threats[attackerID]
 	if shooter and aaDefs[shooter.defID].stockTime then
 		ConsumeMissile(shooter)
@@ -2456,6 +2735,7 @@ function widget:GameFrame(n)
 		if track then
 			UpdateStruck()
 		end
+		Allies.Flush()
 	end
 	if n % 6 == 2 then
 		UpdateGroups()
@@ -2471,7 +2751,23 @@ function widget:GameFrame(n)
 		UpdateWings()
 		UpdateRotation()
 		CloseRuns()
+		Allies.Update()
 	end
+end
+
+function widget:AddConsoleLine(line)
+	Allies.Heard(line)
+end
+
+-- A map point labelled !air places a request exactly.
+function widget:MapDrawCmd(playerID, cmdType, x, y, z, label)
+	if cmdType == "point" and type(label) == "string" and Opt('air_requests') and Allies.HasAir(label) then
+		local name, _, spec, teamID, allyTeamID = Spring.GetPlayerInfo(playerID, false)
+		if name and not spec and allyTeamID == myAllyTeamID then
+			Allies.Request(playerID, name, teamID, label, x, z)
+		end
+	end
+	return false
 end
 
 function widget:GameOver()
@@ -2620,7 +2916,8 @@ end
 
 function widget:GetConfigData()
 	return {hudX = hud.fx, hudY = hud.fy, ledgerX = ledgerPanel.fx, ledgerY = ledgerPanel.fy,
-		hudSize = options.hud_size.value, ledgerSize = options.ledger_size.value, menuX = menuPanel.fx, menuY = menuPanel.fy}
+		hudSize = options.hud_size.value, ledgerSize = options.ledger_size.value, menuX = menuPanel.fx, menuY = menuPanel.fy,
+		requestsX = Allies.panel.fx, requestsY = Allies.panel.fy}
 end
 
 function widget:SetConfigData(data)
@@ -2634,6 +2931,7 @@ function widget:SetConfigData(data)
 	hud.fx, hud.fy = Fraction(data.hudX, HUD_DEFAULT.fx), Fraction(data.hudY, HUD_DEFAULT.fy)
 	ledgerPanel.fx, ledgerPanel.fy = Fraction(data.ledgerX, LEDGER_DEFAULT.fx), Fraction(data.ledgerY, LEDGER_DEFAULT.fy)
 	menuPanel.fx, menuPanel.fy = Fraction(data.menuX, 0.5), Fraction(data.menuY, 0.5)
+	Allies.panel.fx, Allies.panel.fy = Fraction(data.requestsX, Allies.DEFAULT.fx), Fraction(data.requestsY, Allies.DEFAULT.fy)
 	for key, saved in pairs({hud_size = data.hudSize, ledger_size = data.ledgerSize}) do
 		local v = tonumber(saved)
 		if v and v >= options[key].min and v <= options[key].max then
@@ -3241,6 +3539,102 @@ local function DrawLedger()
 	gl.Color(1, 1, 1, 1)
 end
 
+-- Air request panel: allies asking for Magpies, newest first.
+
+function Allies.Visible()
+	return Opt('air_requests') and #Allies.requests > 0
+end
+
+function Allies.Layout()
+	local vsx, vsy = Spring.GetViewGeometry()
+	local k = D.UiScale()
+	local w, headH, rowH = 270*k, 26*k, 34*k
+	local shown = min(#Allies.requests, 5)
+	local more = #Allies.requests - shown
+	local h = headH + shown*rowH + (more > 0 and 16*k or 0) + 4*k
+	-- Kept whole on screen
+	local x = floor(max(0, min(vsx - w, vsx*Allies.panel.fx)))
+	local top = floor(max(min(h, vsy), min(vsy, vsy*Allies.panel.fy)))
+	local rows = {}
+	for i = 1, shown do
+		local y2 = top - headH - (i - 1)*rowH
+		rows[i] = {req = Allies.requests[i], y1 = y2 - rowH, y2 = y2}
+	end
+	return rows, x, top, w, h, k, more
+end
+
+function Allies.Draw()
+	local rows, x, top, w, h, k, more = Allies.Layout()
+	local mx, my = Spring.GetMouseState()
+	D.Panel(x, top - h, x + w, top, 6*k)
+	Text("Air requests", x + 10*k, top - 13*k, 12*k, "vo", COLOR.text)
+	Text("click to look, x to dismiss", x + w - 10*k, top - 13*k, 8.5*k, "rvo", COLOR.faint)
+	for i = 1, #rows do
+		local r = rows[i]
+		local req = r.req
+		local over = mx >= x and mx <= x + w and my >= r.y1 and my < r.y2
+		local overCross = over and mx >= x + w - 28*k
+		gl.Color(COLOR.grid)
+		gl.BeginEnd(GL.LINES, function()
+			gl.Vertex(x + 8*k, r.y2)
+			gl.Vertex(x + w - 8*k, r.y2)
+		end)
+		if over and not overCross then
+			D.RoundRect(x + 4*k, r.y1 + k, x + w - 4*k, r.y2 - k, 4*k, COLOR.tile)
+		end
+		local age = floor(max(0, frame - req.frame)/30)
+		local tint = req.answered and COLOR.good or COLOR.attacking
+		Text(req.name, x + 10*k, r.y2 - 11*k, 11*k, "vo", tint)
+		Text(req.where .. " · " .. string.format("%d:%02d", floor(age/60), age % 60), x + w - 30*k, r.y2 - 11*k, 9*k, "rvo", COLOR.muted)
+		if req.note ~= "" then
+			Text(req.note, x + 10*k, r.y1 + 10*k, 9*k, "vo", COLOR.text)
+		end
+		Text(req.answered and "answered" or req.source, x + w - 30*k, r.y1 + 10*k, 8.5*k, "rvo", req.answered and COLOR.good or COLOR.faint)
+		-- Dismiss
+		local cx, cy, d = x + w - 15*k, (r.y1 + r.y2)*0.5, 3.5*k
+		if overCross then
+			D.Disc(cx, cy, 8*k, 16, D.Alpha(COLOR.returning, 0.25))
+		end
+		gl.Color(overCross and COLOR.returning or COLOR.muted)
+		gl.LineWidth(1.5*k)
+		gl.BeginEnd(GL.LINES, function()
+			gl.Vertex(cx - d, cy - d); gl.Vertex(cx + d, cy + d)
+			gl.Vertex(cx - d, cy + d); gl.Vertex(cx + d, cy - d)
+		end)
+		gl.LineWidth(1)
+	end
+	if more > 0 then
+		Text("+" .. more .. " older", x + 10*k, top - 26*k - #rows*34*k - 8*k, 8.5*k, "vo", COLOR.faint)
+	end
+	gl.Color(1, 1, 1, 1)
+end
+
+-- 'dismiss' or 'row' with its request, 'panel' elsewhere on the panel, nil off it.
+function Allies.Hit(mx, my)
+	if not Allies.Visible() then
+		return nil
+	end
+	local rows, x, top, w, h, k = Allies.Layout()
+	if mx < x or mx > x + w or my > top or my < top - h then
+		return nil
+	end
+	for i = 1, #rows do
+		local r = rows[i]
+		if my >= r.y1 and my < r.y2 then
+			return (mx >= x + w - 28*k) and 'dismiss' or 'row', r.req
+		end
+	end
+	return 'panel'
+end
+
+function Allies.Click(part, req)
+	if part == 'dismiss' then
+		Allies.Remove(req.pid)
+	elseif part == 'row' then
+		Spring.SetCameraTarget(req.x, Spring.GetGroundHeight(req.x, req.z) or 0, req.z, 0.5)
+	end
+end
+
 -- In-game feature menu
 
 local function MenuLayout()
@@ -3254,7 +3648,7 @@ local function MenuLayout()
 		end
 	end
 	rows[#rows + 1] = {close = true}
-	local rowH = 20*k
+	local rowH = min(20*k, (vsy - 36*k)/#rows) -- rows shrink to fit short screens
 	local w = 440*k
 	local h = #rows*rowH + 36*k
 	-- Kept whole on screen
@@ -3448,6 +3842,9 @@ function widget:DrawScreen()
 	end
 	if Opt('show_ledger') then
 		DrawLedger()
+	end
+	if Allies.Visible() then
+		Allies.Draw()
 	end
 	D.DrawGrips()
 	local cardH = 0
@@ -3670,6 +4067,8 @@ function D.SettlePositions()
 	ledgerPanel.fx, ledgerPanel.fy = lx/vsx, ly/vsy
 	local _, mx, top, w, h = MenuLayout()
 	menuPanel.fx, menuPanel.fy = (mx + w*0.5)/vsx, (top - h*0.5)/vsy
+	local _, ax, atop = Allies.Layout()
+	Allies.panel.fx, Allies.panel.fy = ax/vsx, atop/vsy
 end
 
 local function LedgerHit(x, y)
@@ -3698,7 +4097,7 @@ function widget:IsAbove(x, y)
 			return true
 		end
 	end
-	if LedgerHit(x, y) then
+	if Allies.Hit(x, y) or LedgerHit(x, y) then
 		return true
 	end
 	local over = HudHit(x, y)
@@ -3783,6 +4182,12 @@ function widget:MousePress(x, y, button)
 		return true
 	end
 	-- Press on a panel: a drag moves it, a click (no drag) acts on release.
+	local part, req = Allies.Hit(x, y)
+	if part then
+		dragging = {what = Allies.panel, x0 = x, y0 = y, fx0 = Allies.panel.fx, fy0 = Allies.panel.fy,
+			onClick = function() Allies.Click(part, req) end}
+		return true
+	end
 	if LedgerHit(x, y) then
 		local _, ly, _, _, k = LedgerRect()
 		dragging = {what = ledgerPanel, x0 = x, y0 = y, fx0 = ledgerPanel.fx, fy0 = ledgerPanel.fy,
@@ -3886,6 +4291,9 @@ function widget:GetTooltip(x, y)
 	if grip then
 		return "Drag to resize the " .. (grip == 'hud' and "cylinder" or "ledger") .. "."
 	end
+	if Allies.Hit(x, y) then
+		return "Allies asking for air support: !air in chat, or on a map point.\nClick a row to look there, x to dismiss. Drag to move."
+	end
 	if LedgerHit(x, y) then
 		return "Revolver ledger. Click the title bar to switch views. Drag to move, drag the grip to resize."
 	end
@@ -3938,4 +4346,5 @@ widget.RevolverInternals = {
 	StaleCells = StaleCells, CellAge = CellAge, SweepLos = SweepLos, FleetAdvice = FleetAdvice, TargetTable = TargetTable,
 	StockEstimate = StockEstimate, ThreatLabel = ThreatLabel, MissilesCovering = MissilesCovering, FinishFrame = FinishFrame,
 	WholeWings = WholeWings, SetOption = SetOption, NextOptionValue = NextOptionValue, UpdateRoutes = UpdateRoutes,
+	Allies = Allies,
 }
