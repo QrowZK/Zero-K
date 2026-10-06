@@ -7,7 +7,7 @@ function widget:GetInfo()
 		desc      = "Fleet manager for Magpies. Groups them into six wings, shows how many each target needs, keeps shots for ordered targets, balances pads, maps enemy anti-air, records every sortie, tells allies about attacks and lists their !air requests.",
 		author    = "QrowZK",
 		date      = "October 2026",
-		version   = "2026-10-05f",
+		version   = "2026-10-06a",
 		license   = "GNU GPL, v2 or later",
 		layer     = 10,
 		enabled   = false,
@@ -199,7 +199,7 @@ options_order = {
 	-- Ledger
 	'ledger_tracking', 'show_ledger', 'ledger_size', 'ledger_view', 'career_history', 'export_csv',
 	-- Allies
-	'ally_notify', 'air_requests', 'request_minutes',
+	'ally_notify', 'air_requests', 'request_minutes', 'requests_size',
 	-- Grip
 	'sounds', 'reset_positions', 'open_menu', 'fire', 'mark', 'clear_marks', 'recall', 'select_ready',
 	'select_1', 'select_2', 'select_3', 'select_4', 'select_5', 'select_6',
@@ -320,6 +320,7 @@ options = {
 	},
 	air_requests = Switch('List !air requests from allies', 'Allies who type !air in chat, or put !air on a map point, are listed in a panel. Click a row to look there.', true, PATH.allies),
 	request_minutes = {name = 'Keep requests for (minutes)', type = 'number', value = 3, min = 1, max = 10, step = 1, path = PATH.allies},
+	requests_size = {name = 'Air request panel size (%)', desc = 'Also: drag the grip in the lower right corner of the panel.', type = 'number', value = 100, min = 60, max = 300, step = 10, path = PATH.allies},
 
 	-- Grip
 	sounds = Switch('Sounds', nil, true, PATH.grip),
@@ -2838,6 +2839,7 @@ end
 function ResetSizes()
 	SetOption('hud_size', 140)
 	SetOption('ledger_size', 120)
+	SetOption('requests_size', 100)
 end
 
 local ACTIONS = {
@@ -2917,7 +2919,7 @@ end
 function widget:GetConfigData()
 	return {hudX = hud.fx, hudY = hud.fy, ledgerX = ledgerPanel.fx, ledgerY = ledgerPanel.fy,
 		hudSize = options.hud_size.value, ledgerSize = options.ledger_size.value, menuX = menuPanel.fx, menuY = menuPanel.fy,
-		requestsX = Allies.panel.fx, requestsY = Allies.panel.fy}
+		requestsX = Allies.panel.fx, requestsY = Allies.panel.fy, requestsSize = options.requests_size.value}
 end
 
 function widget:SetConfigData(data)
@@ -2932,7 +2934,7 @@ function widget:SetConfigData(data)
 	ledgerPanel.fx, ledgerPanel.fy = Fraction(data.ledgerX, LEDGER_DEFAULT.fx), Fraction(data.ledgerY, LEDGER_DEFAULT.fy)
 	menuPanel.fx, menuPanel.fy = Fraction(data.menuX, 0.5), Fraction(data.menuY, 0.5)
 	Allies.panel.fx, Allies.panel.fy = Fraction(data.requestsX, Allies.DEFAULT.fx), Fraction(data.requestsY, Allies.DEFAULT.fy)
-	for key, saved in pairs({hud_size = data.hudSize, ledger_size = data.ledgerSize}) do
+	for key, saved in pairs({hud_size = data.hudSize, ledger_size = data.ledgerSize, requests_size = data.requestsSize}) do
 		local v = tonumber(saved)
 		if v and v >= options[key].min and v <= options[key].max then
 			options[key].value = v
@@ -3547,11 +3549,11 @@ end
 
 function Allies.Layout()
 	local vsx, vsy = Spring.GetViewGeometry()
-	local k = D.UiScale()
+	local k = D.UiScale()*Opt('requests_size')/100
 	local w, headH, rowH = 270*k, 26*k, 34*k
 	local shown = min(#Allies.requests, 5)
 	local more = #Allies.requests - shown
-	local h = headH + shown*rowH + (more > 0 and 16*k or 0) + 4*k
+	local h = headH + shown*rowH + (more > 0 and 16*k or 0) + 6*k
 	-- Kept whole on screen
 	local x = floor(max(0, min(vsx - w, vsx*Allies.panel.fx)))
 	local top = floor(max(min(h, vsy), min(vsy, vsy*Allies.panel.fy)))
@@ -3563,16 +3565,28 @@ function Allies.Layout()
 	return rows, x, top, w, h, k, more
 end
 
+-- Resize grip: the panel's lower right corner.
+function Allies.GripRect(x, top, w, h, k)
+	return x + w - 14*k, top - h, x + w, top - h + 14*k
+end
+
+function Allies.Grip()
+	local _, x, top, w, h, k = Allies.Layout()
+	return Allies.GripRect(x, top, w, h, k)
+end
+
 function Allies.Draw()
 	local rows, x, top, w, h, k, more = Allies.Layout()
 	local mx, my = Spring.GetMouseState()
+	local gx1, _, _, gy2 = Allies.GripRect(x, top, w, h, k)
+	local onGrip = (dragging and dragging.resize == 'requests') or (mx >= gx1 and mx <= x + w and my >= top - h and my <= gy2)
 	D.Panel(x, top - h, x + w, top, 6*k)
 	Text("Air requests", x + 10*k, top - 13*k, 12*k, "vo", COLOR.text)
 	Text("click to look, x to dismiss", x + w - 10*k, top - 13*k, 8.5*k, "rvo", COLOR.faint)
 	for i = 1, #rows do
 		local r = rows[i]
 		local req = r.req
-		local over = mx >= x and mx <= x + w and my >= r.y1 and my < r.y2
+		local over = not onGrip and mx >= x and mx <= x + w and my >= r.y1 and my < r.y2
 		local overCross = over and mx >= x + w - 28*k
 		gl.Color(COLOR.grid)
 		gl.BeginEnd(GL.LINES, function()
@@ -3997,7 +4011,11 @@ function widget:DrawWorld()
 	gl.Color(1, 1, 1, 1)
 end
 
--- Resize grips: lower right of the cylinder's rim and the ledger's corner.
+-- Resize grips: lower right of the cylinder's rim, and the lower right corners of the ledger and the air
+-- request panel. Each grip sets its panel's size option.
+D.SIZE_KEY = {hud = 'hud_size', ledger = 'ledger_size', requests = 'requests_size'}
+D.SIZE_NAME = {hud = 'cylinder', ledger = 'ledger', requests = 'air request panel'}
+
 function D.HudGrip()
 	local _, _, cx, cy = ChamberCentre(1)
 	local a = -pi/3 -- between chambers C and D
@@ -4010,6 +4028,12 @@ function D.LedgerGrip()
 end
 
 local function GripHit(x, y)
+	if Allies.Visible() then
+		local x1, y1, x2, y2 = Allies.Grip()
+		if x >= x1 and x <= x2 and y >= y1 and y <= y2 then
+			return 'requests'
+		end
+	end
 	if Opt('show_ledger') then
 		local x1, y1, x2, y2 = D.LedgerGrip()
 		if x >= x1 and x <= x2 and y >= y1 and y <= y2 then
@@ -4045,17 +4069,26 @@ function D.DrawGrips()
 	end
 	if Opt('show_ledger') then
 		local x1, y1, x2, y2 = D.LedgerGrip()
-		gl.Color(over == 'ledger' and COLOR.ready or {0.5, 0.49, 0.58, 0.9})
-		gl.LineWidth(1.5)
-		gl.BeginEnd(GL.LINES, function()
-			for i = 1, 3 do
-				local d = (x2 - x1)*i/4
-				gl.Vertex(x2 - 3 - d, y1 + 3); gl.Vertex(x2 - 3, y1 + 3 + d)
-			end
-		end)
-		gl.LineWidth(1)
+		D.CornerGrip(x1, y1, x2, y2, over == 'ledger')
+	end
+	if Allies.Visible() then
+		local x1, y1, x2, y2 = Allies.Grip()
+		D.CornerGrip(x1, y1, x2, y2, over == 'requests')
 	end
 	gl.Color(1, 1, 1, 1)
+end
+
+-- Three short diagonals in a panel's lower right corner.
+function D.CornerGrip(x1, y1, x2, y2, hot)
+	gl.Color(hot and COLOR.ready or {0.5, 0.49, 0.58, 0.9})
+	gl.LineWidth(1.5)
+	gl.BeginEnd(GL.LINES, function()
+		for i = 1, 3 do
+			local d = (x2 - x1)*i/4
+			gl.Vertex(x2 - 3 - d, y1 + 3); gl.Vertex(x2 - 3, y1 + 3 + d)
+		end
+	end)
+	gl.LineWidth(1)
 end
 
 -- Stored positions follow what is on screen, so a panel pushed against an edge moves back at once.
@@ -4175,9 +4208,12 @@ function widget:MousePress(x, y, button)
 	local grip = GripHit(x, y)
 	if grip then
 		local _, _, cx, cy = ChamberCentre(1)
-		local lx, _, lw = LedgerRect()
+		local lx = LedgerRect() -- a corner grip sizes its panel by the drag's distance from the left edge
+		if grip == 'requests' then
+			lx = select(2, Allies.Layout())
+		end
 		dragging = {resize = grip, x0 = x, y0 = y, moved = true, onClick = function() end,
-			size0 = options[grip == 'hud' and 'hud_size' or 'ledger_size'].value,
+			size0 = options[D.SIZE_KEY[grip]].value,
 			span0 = grip == 'hud' and max(1, Dist2D(x, y, cx, cy)) or max(1, x - lx), cx = cx, cy = cy, lx = lx}
 		return true
 	end
@@ -4207,8 +4243,8 @@ end
 
 function widget:MouseMove(x, y)
 	if dragging and dragging.resize then
-		-- Size follows the grip: distance from the cylinder's centre, or the ledger's width.
-		local key = dragging.resize == 'hud' and 'hud_size' or 'ledger_size'
+		-- Size follows the grip: distance from the cylinder's centre, or the panel's width.
+		local key = D.SIZE_KEY[dragging.resize]
 		local span = dragging.resize == 'hud' and Dist2D(x, y, dragging.cx, dragging.cy) or (x - dragging.lx)
 		local option = options[key]
 		local size = floor(dragging.size0*span/dragging.span0/5 + 0.5)*5
@@ -4242,7 +4278,7 @@ function widget:MouseRelease(x, y, button)
 		local d = dragging
 		dragging = nil
 		if d.resize then
-			local key = d.resize == 'hud' and 'hud_size' or 'ledger_size'
+			local key = D.SIZE_KEY[d.resize]
 			SetOption(key, options[key].value) -- saved with the settings
 		end
 		D.SettlePositions()
@@ -4289,10 +4325,10 @@ function widget:GetTooltip(x, y)
 	end
 	local grip = GripHit(x, y)
 	if grip then
-		return "Drag to resize the " .. (grip == 'hud' and "cylinder" or "ledger") .. "."
+		return "Drag to resize the " .. D.SIZE_NAME[grip] .. "."
 	end
 	if Allies.Hit(x, y) then
-		return "Allies asking for air support: !air in chat, or on a map point.\nClick a row to look there, x to dismiss. Drag to move."
+		return "Allies asking for air support: !air in chat, or on a map point.\nClick a row to look there, x to dismiss. Drag to move, drag the grip to resize."
 	end
 	if LedgerHit(x, y) then
 		return "Revolver ledger. Click the title bar to switch views. Drag to move, drag the grip to resize."
