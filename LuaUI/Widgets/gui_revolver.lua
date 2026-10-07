@@ -7,7 +7,7 @@ function widget:GetInfo()
 		desc      = "Fleet manager for Magpies. Groups them into six wings, shows how many each target needs, keeps shots for ordered targets, balances pads, maps enemy anti-air, records every sortie, tells allies about attacks and lists their !air requests.",
 		author    = "QrowZK",
 		date      = "October 2026",
-		version   = "2026-10-06a",
+		version   = "2026-10-07a",
 		license   = "GNU GPL, v2 or later",
 		layer     = 10,
 		enabled   = false,
@@ -27,11 +27,17 @@ local customCmds = VFS.Include("LuaRules/Configs/customcmds.lua")
 -- Commands and fire states, plus a few helpers (a table: the main chunk is near Lua's 200-local limit)
 local C = {
 	ATTACK = CMD.ATTACK, MOVE = CMD.MOVE, FIRE_STATE = CMD.FIRE_STATE, OPT_SHIFT = CMD.OPT_SHIFT,
+	OPT_INTERNAL = CMD.OPT_INTERNAL or 8,
 	REARM = customCmds.REARM, FIND_PAD = customCmds.FIND_PAD, RETREAT = customCmds.RETREAT,
 	LOOP_ATTACK = customCmds.LOOP_ATTACK, SET_TARGET = customCmds.UNIT_SET_TARGET,
 	HOLD = 0, FREE = 2,
 }
 C.killHome = {} -- Magpies whose hand-ordered target just died, sent home after this poll
+
+-- "1 Magpie", "3 Magpies"
+function C.Magpies(n)
+	return n .. (n == 1 and " Magpie" or " Magpies")
+end
 
 local defs = VFS.Include("LuaUI/Configs/revolver_defs.lua")
 
@@ -193,7 +199,7 @@ options_order = {
 	-- Sights
 	'show_card', 'live_correction', 'allocate', 'horizon', 'auto_style', 'slow_chain', 'kill_confirm',
 	-- Trigger
-	'hold_fire', 'release_near_target', 'time_on_target', 'staging_distance', 'rotate_fire',
+	'hold_fire', 'release_near_target', 'time_on_target', 'hand_together', 'staging_distance', 'rotate_fire',
 	-- Radar
 	'threat_map', 'threat_style', 'path_card', 'route_lines', 'stale_intel', 'stale_seconds', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'stockpile_speed', 'stockpile_cap', 'reload_tracking',
 	-- Ledger
@@ -262,8 +268,9 @@ options = {
 	-- Trigger
 	hold_fire = Switch('Hold fire until the target', 'Launched Magpies hold fire so they only shoot their ordered target.', true, PATH.trigger),
 	release_near_target = Switch('Free fire near the target', 'Within weapon range of the target, Magpies may also shoot units next to it.', false, PATH.trigger),
-	time_on_target = Switch('Arrive together', 'Wings gather at a staging point before the attack so they arrive at the same time.', true, PATH.trigger),
-	staging_distance = {name = 'Staging distance', type = 'number', value = 1300, min = 700, max = 2500, step = 50, path = PATH.trigger},
+	time_on_target = Switch('Arrive together', 'Fire: Magpies further from the target set off first and the closer ones wait their turn, so the whole attack arrives at once.', true, PATH.trigger),
+	hand_together = Switch('Arrive together on right-click', 'The same for attacks you order by right-clicking an enemy with Magpies selected.', false, PATH.trigger),
+	staging_distance = {name = 'Approach distance', desc = 'How far out from the target a run set with Set approach begins.', type = 'number', value = 1300, min = 700, max = 2500, step = 50, path = PATH.trigger},
 	rotate_fire = Switch('Rotate fire', 'When a wing runs dry, the next chambered wing launches at the same targets.', false, PATH.trigger),
 
 	-- Radar
@@ -337,8 +344,8 @@ options = {
 	clear_marks = {name = 'Clear marks', type = 'button', path = PATH.grip, OnChange = function() ClearMarks() end},
 	recall = {name = 'Recall selected', desc = 'Send the selected Magpies, or every airborne wing if none are selected, to pads.', type = 'button', path = PATH.grip, OnChange = function() Recall() end},
 	select_ready = {name = 'Select chambered wings', type = 'button', path = PATH.grip, OnChange = function() SelectReady() end},
-	approach = {name = 'Set approach', desc = 'Then drag on the map in the direction the next attack should fly, or click where it should come from.', type = 'button', path = PATH.grip, OnChange = function() SetApproach() end},
-	pool = {name = 'Pool half-empty Magpies', type = 'button', path = PATH.grip, OnChange = function() PoolPartial() end},
+	approach = {name = 'Set approach', desc = 'Then drag an arrow on the map the way the next attack should fly over its target, or click where it should come in from. Used by the next Fire, or the next right-click attack with Magpies selected.', type = 'button', path = PATH.grip, OnChange = function() SetApproach() end},
+	pool = {name = 'Pool Magpies with ammo left', desc = 'Selected Magpies (or all) with ammo left below Ready at ammo join wing F; any flying home wait beside the pad instead of landing, which would throw their ammo away. They go back to their wing once rearmed.', type = 'button', path = PATH.grip, OnChange = function() PoolPartial(true) end},
 	calibrate = {name = 'Calibration mode (single player)', desc = 'Keeps sending chambered wings at the enemy under the cursor and compares measured hit rates with the Magpie Manual.', type = 'button', path = PATH.grip, OnChange = function() ToggleCalibration() end},
 }
 for w = 1, 6 do
@@ -352,7 +359,7 @@ local MENU = {
 	{title = 'Cylinder', keys = {'auto_wing', 'assign_mode', 'spare_wing', 'show_hud', 'wing_labels', 'fleet_advisor'}},
 	{title = 'Reload', keys = {'pad_balance', 'retreat_state'}},
 	{title = 'Sights', keys = {'show_card', 'live_correction', 'allocate', 'horizon', 'auto_style', 'slow_chain', 'kill_confirm'}},
-	{title = 'Trigger', keys = {'hold_fire', 'release_near_target', 'time_on_target', 'rotate_fire'}},
+	{title = 'Trigger', keys = {'hold_fire', 'release_near_target', 'time_on_target', 'hand_together', 'rotate_fire'}},
 	{title = 'Radar', keys = {'threat_map', 'threat_style', 'path_card', 'route_lines', 'stale_intel', 'route_alert', 'fighter_alert', 'fighter_pullback', 'stockpile_watch', 'reload_tracking'}},
 	{title = 'Ledger', keys = {'ledger_tracking', 'show_ledger', 'ledger_view', 'career_history', 'export_csv'}},
 	{title = 'Allies', keys = {'ally_notify', 'air_requests'}},
@@ -808,7 +815,7 @@ local function AddToWing(unitID, w)
 	local mag = magpies[unitID]
 	wings[w].units[unitID] = true
 	wings[w].count = wings[w].count + 1
-	mag.wing = w
+	mag.wing, mag.poolFrom = w, nil
 	local retreat = Opt('retreat_state')
 	if retreat ~= 'keep' and C.RETREAT then
 		Spring.GiveOrderToUnit(unitID, C.RETREAT, {tonumber(retreat)}, 0)
@@ -1832,41 +1839,262 @@ local function SetMode(list, mode)
 	end
 end
 
-local function StagingPoint(group)
-	local tx, _, tz = Spring.GetUnitPosition(group.target)
-	if not tx then
-		return false
-	end
-	local fromX, fromZ
-	local tx0, tz0 = tx, tz
-	if group.approach and group.approach.dx then
-		fromX, fromZ = tx0 - group.approach.dx, tz0 - group.approach.dz
-	elseif group.approach then
-		fromX, fromZ = group.approach.x, group.approach.z
-	else
-		fromX, fromZ = Centroid(UnitList(group.units))
-	end
-	if not fromX then
-		return false
-	end
-	local dx, dz = fromX - tx, fromZ - tz
-	local d = sqrt(dx*dx + dz*dz)
-	if d < 1 then
-		dx, dz, d = 0, 1, 1
-	end
-	local dist = Opt('staging_distance')
-	local sx, sz = tx + dx/d*dist, tz + dz/d*dist
-	local sy = Spring.GetGroundHeight(sx, sz) or 0
-	return sx, sy, sz
+-- The engine drops a move order whose point is off the map, so waypoints are kept inside it.
+function C.InMap(x, z)
+	local margin = 100
+	return max(margin, min((Game.mapSizeX or x + margin) - margin, x)), max(margin, min((Game.mapSizeZ or z + margin) - margin, z))
 end
 
+-- Waypoints for an approach: the run starts the approach distance out on the chosen side of the target. A
+-- Magpie on the far side goes round the target at that distance, the side with less known anti-air,
+-- instead of flying over it on the way. Empty without an approach.
+function C.ApproachRoute(px, pz, tx, tz, approach)
+	if not (approach and px and tx) then
+		return {}
+	end
+	local ux, uz -- from the target towards where the run comes from
+	if approach.dx then
+		ux, uz = -approach.dx, -approach.dz
+	else
+		ux, uz = approach.x - tx, approach.z - tz
+		local d = sqrt(ux*ux + uz*uz)
+		if d < 1 then
+			ux, uz, d = 0, 1, 1
+		end
+		ux, uz = ux/d, uz/d
+	end
+	local dist = Opt('staging_distance')
+	local sx, sz = C.InMap(tx + ux*dist, tz + uz*dist)
+	local clear = 0.7*min(dist, Dist2D(tx, tz, sx, sz))
+	if DistToSegment(tx, tz, px, pz, sx, sz) >= clear then
+		return {{sx, sz}}
+	end
+	local a0 = math.atan2(pz - tz, px - tx)
+	local turn = (math.atan2(sz - tz, sx - tx) - a0 + pi) % (2*pi) - pi
+	local function Arc(delta)
+		local steps = max(1, ceil(math.abs(delta)/(pi/4)))
+		local route = {}
+		for i = 1, steps - 1 do
+			local a = a0 + delta*i/steps
+			route[#route + 1] = {C.InMap(tx + cos(a)*dist, tz + sin(a)*dist)}
+		end
+		route[#route + 1] = {sx, sz}
+		return route
+	end
+	local route = Arc(turn)
+	if math.abs(turn) > pi/2 then
+		-- More than a quarter turn round: the other way is further, but take it if it passes less known
+		-- anti-air.
+		local other = Arc(turn - 2*pi*(turn > 0 and 1 or -1))
+		local function Risk(r)
+			local total, x, z = 0, px, pz
+			for i = 1, #r do
+				total, x, z = total + RouteRisk(x, z, r[i][1], r[i][2]), r[i][1], r[i][2]
+			end
+			return total
+		end
+		if Risk(other) < Risk(route) - 1 then
+			route = other
+		end
+	end
+	return route
+end
+
+-- Flight a Magpie still has to make before it is on its way to (x, z): about a second to take off from the
+-- ground or a pad, or the turn towards the point at a turning circle of about 110 elmos.
+function C.Allowance(unitID, x, z)
+	local ux, uy, uz = Spring.GetUnitPosition(unitID)
+	if not ux then
+		return 0
+	end
+	if uy - max(Spring.GetGroundHeight(ux, uz) or 0, 0) < 60 then
+		return 250
+	end
+	local fx, _, fz = Spring.GetUnitDirection(unitID)
+	local dx, dz = x - ux, z - uz
+	local f, d = sqrt((fx or 0)^2 + (fz or 0)^2), sqrt(dx*dx + dz*dz)
+	if f < 1e-6 or d < 1 then
+		return 0
+	end
+	local angle = math.acos(max(-1, min(1, (fx*dx + fz*dz)/(f*d))))
+	return 110*(angle - sin(angle))
+end
+
+-- Flight left from (x, z) through route[i..] to the target.
+function C.PathFrom(x, z, route, i, tx, tz)
+	local length = 0
+	for j = i, #route do
+		length = length + Dist2D(x, z, route[j][1], route[j][2])
+		x, z = route[j][1], route[j][2]
+	end
+	return length + Dist2D(x, z, tx, tz)
+end
+
+-- A Magpie's flight to its group's target: the whole way for one still waiting, what is left for one on its
+-- way (from the waypoint it is flying to). Nil for one that set off and was then given something else to do.
+function C.Flight(unitID, group, waiting)
+	local x, _, z = Spring.GetUnitPosition(unitID)
+	local tx, _, tz = Spring.GetUnitPosition(group.target)
+	if not (x and tx) then
+		return nil
+	end
+	local route = group.routes and group.routes[unitID] or {}
+	local i = 1
+	if not waiting then
+		-- Which waypoint it is on comes from its current order. Orders take a moment to arrive over the
+		-- network, so a Magpie without its own orders yet has not set off. Once they have arrived, any other
+		-- order came from the player or the game, and the Magpie no longer sets the pace.
+		local cmdID, _, _, p1, _, p3 = Spring.GetUnitCurrentCommand(unitID)
+		local ours = cmdID == C.ATTACK and p1 == group.target
+		if ours then
+			i = #route + 1
+		elseif cmdID == C.MOVE and p3 then
+			for j = 1, #route do
+				if math.abs(route[j][1] - p1) < 1 and math.abs(route[j][2] - p3) < 1 then
+					i, ours = j, true
+				end
+			end
+		end
+		local started = group.started and group.started[unitID]
+		if ours and started then
+			group.started[unitID] = true
+		elseif started == true or (started and frame - started >= 90) then
+			return nil
+		end
+	end
+	local nx, nz = tx, tz
+	if route[i] then
+		nx, nz = route[i][1], route[i][2]
+	end
+	return C.PathFrom(x, z, route, i, tx, tz) + C.Allowance(unitID, nx, nz)
+end
+
+-- Send one Magpie of a group on its way: through its approach waypoints, if any, then the attack.
+function C.Start(unitID, group)
+	local route = group.routes and group.routes[unitID] or {}
+	group.started = group.started or {}
+	group.started[unitID] = frame
+	C.Unhold(unitID)
+	for i = 1, #route do
+		local x, z = route[i][1], route[i][2]
+		Spring.GiveOrderToUnit(unitID, C.MOVE, {x, Spring.GetGroundHeight(x, z) or 0, z}, i > 1 and C.OPT_SHIFT or 0)
+	end
+	Spring.GiveOrderToUnit(unitID, C.ATTACK, {group.target}, #route > 0 and C.OPT_SHIFT or 0)
+end
+
+-- Without fire discipline a Magpie holds fire only while it waits its turn: give its fire state back.
+function C.Unhold(unitID)
+	local mag = magpies[unitID]
+	if mag and mag.savedFire ~= nil and not Opt('hold_fire') then
+		Spring.GiveOrderToUnit(unitID, C.FIRE_STATE, {mag.savedFire}, 0)
+		mag.savedFire = nil
+	end
+end
+
+-- Take a Magpie out of its attack group, giving back its fire state.
+function C.Drop(unitID)
+	local mag = magpies[unitID]
+	local group = mag and mag.group and groups[mag.group]
+	if group then
+		group.units[unitID] = nil
+		if group.wait then
+			group.wait[unitID] = nil
+		end
+	end
+	if mag then
+		mag.group = nil
+		if mag.savedFire ~= nil then
+			Spring.GiveOrderToUnit(unitID, C.FIRE_STATE, {mag.savedFire}, 0)
+			mag.savedFire = nil
+		end
+	end
+end
+
+-- Arrive together: Magpies further out leave first. Each of the others waits where it is (on a pad, landed
+-- or circling) until the furthest Magpie already on its way is no further from the target than it is,
+-- across every group of the same Fire, so they all arrive at once. Revolver gives a waiting Magpie no
+-- orders: once the launch's stop has reached it (its queue was seen empty, or after 3 s), any order other
+-- than an attack the engine picked for it while idle came from the player or the game (a retreat to a
+-- pad, say), and the Magpie leaves the attack. If the leaders stall, the rest go after the longest trip
+-- time plus 8 s.
+function C.Release(volley)
+	local lead, longest, waiting = false, 0, {}
+	for _, group in pairs(groups) do
+		if group.volley == volley then
+			for unitID in pairs(group.units) do
+				if group.wait and group.wait[unitID] then
+					local cmdID, cmdOpts = Spring.GetUnitCurrentCommand(unitID)
+					if not cmdID or (cmdID == C.ATTACK and floor((cmdOpts or 0)/C.OPT_INTERNAL) % 2 == 1) then
+						group.wait[unitID] = 2 -- the stop has reached it
+					elseif group.wait[unitID] == 2 or frame - group.launchFrame >= 90 then
+						C.Drop(unitID)
+					end
+					if group.wait and group.wait[unitID] then
+						local length = C.Flight(unitID, group, true) or 0
+						waiting[#waiting + 1] = {unitID, group, length}
+						longest = max(longest, length)
+					end
+				else
+					local left = C.Flight(unitID, group, false)
+					if left and (not lead or left > lead) then
+						lead = left
+					end
+				end
+			end
+		end
+	end
+	volley.deadline = volley.deadline or (frame + floor(30*longest/magpieStats.speed) + 30*8)
+	local bar = (lead or longest) - 25
+	for i = 1, #waiting do
+		local unitID, group, length = waiting[i][1], waiting[i][2], waiting[i][3]
+		if length >= bar or frame >= volley.deadline then
+			group.wait[unitID] = nil
+			C.Start(unitID, group)
+		end
+	end
+	for _, group in pairs(groups) do
+		if group.volley == volley and group.wait then
+			for unitID in pairs(group.wait) do
+				if not group.units[unitID] then
+					group.wait[unitID] = nil -- lost, recalled or out of the attack some other way
+				end
+			end
+			if not next(group.wait) then
+				group.wait = nil
+				group.phase = "attack"
+			end
+		end
+	end
+end
+
+-- Say how many Magpies hold back, so a wing that does not all take off at once is no surprise.
+function C.SayWaiting(launched)
+	local waiting, total = 0, 0
+	for i = 1, #launched do
+		for unitID in pairs(launched[i].units) do
+			total = total + 1
+			if launched[i].wait and launched[i].wait[unitID] then
+				waiting = waiting + 1
+			end
+		end
+	end
+	if waiting > 0 then
+		Alert(waiting .. " of " .. C.Magpies(total) .. (waiting == 1 and " waits its turn" or " wait their turn") .. " so they all arrive together.")
+	end
+end
+
+-- Attack the group's target straight away: no waiting, no approach (a new target after a kill, slow chain).
 local function OrderAttack(group)
+	group.wait, group.volley, group.routes, group.started = nil, nil, nil, nil
+	group.phase = "attack"
 	local list = UnitList(group.units)
 	if #list == 0 then
 		return
 	end
+	for i = 1, #list do
+		C.Unhold(list[i])
+	end
 	Spring.GiveOrderToUnitArray(list, C.ATTACK, {group.target}, 0)
-	group.phase = "attack"
 end
 
 -- Send Magpies to a pad to land. The pad gadget refuses an unshifted REARM from a Magpie with full ammo
@@ -1894,7 +2122,7 @@ local function SendHome(list)
 		end
 	end
 	if stranded > 0 then
-		Alert(stranded .. " Magpies have no pad to land on.", "nopad")
+		Alert(C.Magpies(stranded) .. (stranded == 1 and " has" or " have") .. " no pad to land on.", "nopad")
 	end
 	return sent
 end
@@ -1949,7 +2177,7 @@ local function ReleaseGroup(group, home)
 	if home and #list > 0 then
 		local sent = SendHome(list)
 		if sent > 0 then
-			Alert("Wing " .. (WING_LETTER[group.wing] or "?") .. ": " .. (group.target and not IsAliveEnemy(group.target) and "target down, " or "") .. sent .. " Magpies heading to pads.")
+			Alert("Wing " .. (WING_LETTER[group.wing] or "?") .. ": " .. (group.target and not IsAliveEnemy(group.target) and "target down, " or "") .. C.Magpies(sent) .. " heading to pads.")
 		end
 	end
 	groups[group.id] = nil
@@ -1978,12 +2206,17 @@ local function Retarget(group, target)
 	Allies.Dispatch(target, #UnitList(group.units))
 end
 
-local function LaunchGroup(list, target, queue, mode, approach, rotate, direct)
+-- volley: the groups launched together, which arrive together. hand: an attack ordered by right-click, which
+-- keeps each Magpie's own attack style.
+local function LaunchGroup(list, target, queue, mode, approach, rotate, direct, volley, hand)
 	local group = {
 		id = nextGroupID, units = {}, target = target, queue = queue, mode = mode,
 		approach = approach, rotate = rotate, launchFrame = frame,
 	}
 	nextGroupID = nextGroupID + 1
+	-- Waiting Magpies hold fire even without fire discipline: one free to fire would go after anything near.
+	local together = not direct and Opt(hand and 'hand_together' or 'time_on_target')
+	local hold = Opt('hold_fire') or together
 	local w
 	for i = 1, #list do
 		local mag = magpies[list[i]]
@@ -1991,7 +2224,7 @@ local function LaunchGroup(list, target, queue, mode, approach, rotate, direct)
 		mag.group = group.id
 		mag.state = "attacking"
 		w = w or mag.wing
-		if Opt('hold_fire') then
+		if hold then
 			if mag.savedFire == nil then
 				local firestate = Spring.GetUnitStates(list[i], false)
 				mag.savedFire = firestate or C.FREE
@@ -2009,25 +2242,45 @@ local function LaunchGroup(list, target, queue, mode, approach, rotate, direct)
 	end
 	group.run = run
 
-	SetMode(list, mode)
-	if Opt('hold_fire') then
+	if not hand then
+		SetMode(list, mode)
+	end
+	if hold then
 		SetFireState(list, C.HOLD)
 	end
-	if not direct and (Opt('time_on_target') or approach) then
-		local sx, sy, sz = StagingPoint(group)
-		if sx then
-			Spring.GiveOrderToUnitArray(list, C.MOVE, {sx, sy, sz}, 0)
-			group.phase = "staging"
-			group.staging = {sx, sy, sz}
-			if not Opt('time_on_target') then
-				-- Approach only: queue the attack straight after the waypoint.
-				Spring.GiveOrderToUnitArray(list, C.ATTACK, {target}, C.OPT_SHIFT)
-				group.phase = "attack"
-			end
-			return group
+	if direct then
+		OrderAttack(group)
+		return group
+	end
+	local tx, _, tz = Spring.GetUnitPosition(target)
+	group.routes = {}
+	if approach then
+		for i = 1, #list do
+			local x, _, z = Spring.GetUnitPosition(list[i])
+			group.routes[list[i]] = C.ApproachRoute(x, z, tx, tz, approach)
 		end
 	end
-	OrderAttack(group)
+	if together then
+		-- Arrive together: nobody moves until C.Release says when. A Magpie busy with something else holds
+		-- where it is meanwhile.
+		group.volley = volley or {}
+		group.wait = {}
+		for i = 1, #list do
+			group.wait[list[i]] = true
+			if Spring.GetUnitCurrentCommand(list[i]) then
+				Spring.GiveOrderToUnit(list[i], CMD.STOP, {}, 0)
+			end
+		end
+		group.phase = "staging"
+		if not volley then
+			C.Release(group.volley)
+		end
+		return group
+	end
+	for i = 1, #list do
+		C.Start(list[i], group)
+	end
+	group.phase = "attack"
 	return group
 end
 
@@ -2176,15 +2429,18 @@ function Fire(targetsOverride, rotate)
 		plan, spare, shortfall = WholeWings(targets, pool, horizon)
 	end
 	local launched = {}
+	local volley = {}
 	for i = 1, #plan do
 		local p = plan[i]
 		if #p.units > 0 then
-			launched[#launched + 1] = LaunchGroup(p.units, p.target, targets, p.mode, approachPoint, rotate or Opt('rotate_fire'))
+			launched[#launched + 1] = LaunchGroup(p.units, p.target, targets, p.mode, approachPoint, rotate or Opt('rotate_fire'), false, volley)
 		end
 	end
+	C.Release(volley)
+	C.SayWaiting(launched)
 	approachPoint = nil
 	if shortfall > 0 then
-		Alert("Short " .. shortfall .. " Magpies for the chosen kill time.")
+		Alert("Short " .. C.Magpies(shortfall) .. " for the chosen kill time.")
 	end
 	if not targetsOverride then
 		marks = {}
@@ -2255,22 +2511,95 @@ end
 function SetApproach()
 	approachMode = true
 	approachDrag = nil
-	Alert("Drag on the map in the direction to attack, or click where to come from. Right-click cancels.")
+	Alert("Drag an arrow on the map the way the attack should fly over its target, or click where it should come in from. Right-click cancels.")
 	return true
 end
 
-function PoolPartial()
-	local moved = 0
-	local cap = Opt('wing_size')
-	for unitID, mag in pairs(magpies) do
-		if mag.wing ~= WING_COUNT and not mag.group and mag.ammo > 0 and mag.ammo < 0.5 and mag.state == "idle" then
-			if wings[WING_COUNT].count < cap*2 then
+-- A pooled Magpie flying home waits beside its pad instead (circling, or landed next to it in the Land idle
+-- mode), since landing on the pad throws away the ammo it has left.
+function C.HoldNearPad(unitID, mag)
+	local x, _, z = Spring.GetUnitPosition(unitID)
+	local padID = (mag.pad and pads[mag.pad]) and mag.pad or (next(pads) and ChoosePad(unitID))
+	local px, _, pz
+	if padID then
+		px, _, pz = Spring.GetUnitPosition(padID)
+	end
+	mag.homeFrame, mag.pad, mag.handTarget = nil, nil, nil
+	if not (x and px) then
+		Spring.GiveOrderToUnit(unitID, CMD.STOP, {}, 0)
+		return
+	end
+	local d = Dist2D(x, z, px, pz)
+	local hx, hz = px + 300, pz
+	if d > 1 then
+		hx, hz = px + (x - px)/d*300, pz + (z - pz)/d*300
+	end
+	hx, hz = C.InMap(hx, hz)
+	Spring.GiveOrderToUnit(unitID, C.MOVE, {hx, Spring.GetGroundHeight(hx, hz) or 0, hz}, 0)
+end
+
+-- Pool: Magpies with ammo left, but too little to count as ready, move to wing F so the other wings stay
+-- chambered. Pressed by hand it pools the selected Magpies (all of them if none are), keeps any flying home
+-- in the air beside the pad, and says what it did. Wing F as the spare wing runs it every half second for
+-- idle Magpies only. A pooled Magpie goes back to its own wing once it is rearmed (see C.Unpool).
+function PoolPartial(byHand)
+	local list = {}
+	for _, unitID in ipairs(byHand and Spring.GetSelectedUnits() or {}) do
+		if magpies[unitID] then
+			list[#list + 1] = unitID
+		end
+	end
+	if #list == 0 then
+		list = UnitList(magpies)
+	end
+	local ready = Opt('ready_ammo')/100
+	local cap = Opt('wing_size')*2
+	local moved, kept, full = 0, 0, 0
+	for i = 1, #list do
+		local unitID = list[i]
+		local mag = magpies[unitID]
+		local homeward = byHand and mag.state == "returning"
+		if mag.wing ~= WING_COUNT and not mag.group and mag.noAmmo == 0 and mag.ammo > 0 and mag.ammo < ready
+				and (mag.state == "idle" or homeward) then
+			if wings[WING_COUNT].count >= cap then
+				full = full + 1
+			else
+				local from = mag.wing
 				AddToWing(unitID, WING_COUNT)
+				mag.poolFrom = from
 				moved = moved + 1
+				if homeward then
+					C.HoldNearPad(unitID, mag)
+					kept = kept + 1
+				end
 			end
 		end
 	end
+	if byHand then
+		local ammo = Opt('ready_ammo') .. "%"
+		if moved > 0 then
+			Alert("Pooled " .. C.Magpies(moved) .. " into wing F." .. (kept > 0 and (" " .. kept .. " flying home now " .. (kept == 1 and "waits" or "wait") .. " beside the pad with " .. (kept == 1 and "its" or "their") .. " ammo.") or "")
+				.. (full > 0 and (" Wing F is full; " .. full .. " left out.") or ""))
+		elseif full > 0 then
+			Alert("Wing F is full; no Magpies pooled.")
+		else
+			Alert("Nothing to pool: a Magpie pools when it has some ammo left but under " .. ammo .. ", and is outside wing F and not in an attack.")
+		end
+	end
 	return moved
+end
+
+-- A pooled Magpie rearmed to ready goes back to the wing it came from (or the next wing with room).
+function C.Unpool(unitID, mag)
+	if mag.poolFrom and mag.wing == WING_COUNT and mag.noAmmo == 0 and mag.ammo*100 >= Opt('ready_ammo') then
+		local w = mag.poolFrom
+		if w == WING_COUNT or wings[w].count >= Opt('wing_size') then
+			w = PickWing()
+		end
+		AddToWing(unitID, w)
+	elseif mag.poolFrom and mag.wing ~= WING_COUNT then
+		mag.poolFrom = nil
+	end
 end
 
 function ToggleCalibration()
@@ -2390,12 +2719,16 @@ local function UpdateMagpie(unitID, mag)
 end
 
 local function UpdateGroups()
+	local chains = {} -- launched after the loop: adding groups while going through them is not allowed
 	for id, group in pairs(groups) do
 		-- Drop members that went home or died.
 		for unitID in pairs(group.units) do
 			local mag = magpies[unitID]
 			if not mag or mag.group ~= id then
 				group.units[unitID] = nil
+				if group.wait then
+					group.wait[unitID] = nil
+				end
 			end
 		end
 		if not next(group.units) then
@@ -2413,20 +2746,7 @@ local function UpdateGroups()
 			end
 		else
 			local list = UnitList(group.units)
-			if group.phase == "staging" then
-				-- Time on target: release once most of the wing is at the staging point, or after 12 s.
-				local sx, _, sz = group.staging[1], group.staging[2], group.staging[3]
-				local near = 0
-				for i = 1, #list do
-					local x, _, z = Spring.GetUnitPosition(list[i])
-					if x and Dist2D(x, z, sx, sz) < 350 then
-						near = near + 1
-					end
-				end
-				if near >= ceil(#list*0.8) or frame - group.launchFrame > 30*12 then
-					OrderAttack(group)
-				end
-			elseif group.phase == "attack" then
+			if group.phase == "attack" then
 				-- Fire discipline
 				if Opt('hold_fire') and Opt('release_near_target') then
 					for i = 1, #list do
@@ -2453,11 +2773,23 @@ local function UpdateGroups()
 								group.units[list[i]] = nil
 								magpies[list[i]].group = nil
 							end
-							LaunchGroup(moving, nextTarget, group.queue, group.mode, nil, group.rotate, true)
+							chains[#chains + 1] = {moving, nextTarget, group.queue, group.mode, group.rotate}
 						end
 					end
 				end
 			end
+		end
+	end
+	for i = 1, #chains do
+		local c = chains[i]
+		LaunchGroup(c[1], c[2], c[3], c[4], nil, c[5], true)
+	end
+	-- Arrive together: start the Magpies whose turn has come, one Fire at a time.
+	local released = {}
+	for _, group in pairs(groups) do
+		if group.wait and group.volley and not released[group.volley] then
+			released[group.volley] = true
+			C.Release(group.volley)
 		end
 	end
 end
@@ -2542,6 +2874,11 @@ local function UpdateWings()
 			Alert("Wing " .. WING_LETTER[w] .. " chambered (" .. s.n .. ").", nil, "sounds/beep4.wav")
 		end
 		wings[w].wasReady = s.chambered
+	end
+	for unitID, mag in pairs(magpies) do
+		if mag.poolFrom then
+			C.Unpool(unitID, mag)
+		end
 	end
 	if Opt('spare_wing') then
 		PoolPartial()
@@ -2730,7 +3067,7 @@ function widget:GameFrame(n)
 			local sent = SendHome(list)
 			if sent > 0 then
 				local w = magpies[list[1]] and magpies[list[1]].wing
-				Alert((w and ("Wing " .. WING_LETTER[w] .. ": ") or "") .. "target down, " .. sent .. " Magpies heading to pads.")
+				Alert((w and ("Wing " .. WING_LETTER[w] .. ": ") or "") .. "target down, " .. C.Magpies(sent) .. " heading to pads.")
 			end
 		end
 		if track then
@@ -2769,6 +3106,56 @@ function widget:MapDrawCmd(playerID, cmdType, x, y, z, label)
 		end
 	end
 	return false
+end
+
+-- A right-click attack with Magpies selected goes through Revolver when an approach is set (the attack uses
+-- it up) or Arrive together on right-click is on: the Magpies fly the approach if there is one, and with that
+-- switch on the closer ones wait their turn as with Fire, each keeping its own attack style. The rest of the
+-- selection, and Magpies with no ammo, get the order as given. Queued (shift) and modified clicks are left
+-- alone.
+function widget:CommandNotify(cmdID, params, opts)
+	if cmdID ~= C.ATTACK or #params ~= 1 or not (approachPoint or Opt('hand_together')) then
+		return false
+	end
+	if opts and (opts.shift or opts.ctrl or opts.alt or opts.meta) then
+		return false
+	end
+	local target = params[1]
+	if not (IsAliveEnemy(target) and Spring.GetUnitPosition(target)) then
+		return false
+	end
+	local list, others = {}, {}
+	for _, unitID in ipairs(Spring.GetSelectedUnits() or {}) do
+		local mag = magpies[unitID]
+		if mag and mag.noAmmo == 0 and mag.ammo > 0 then
+			list[#list + 1] = unitID
+		else
+			others[#others + 1] = unitID
+		end
+	end
+	if #list == 0 then
+		return false
+	end
+	for i = 1, #list do
+		-- Out of any earlier attack, keeping the fire state it had before that one (giving it back here
+		-- would arrive after the new attack reads it)
+		local mag = magpies[list[i]]
+		local old = mag.group and groups[mag.group]
+		if old then
+			old.units[list[i]] = nil
+			if old.wait then
+				old.wait[list[i]] = nil
+			end
+		end
+		mag.group, mag.handTarget = nil, nil
+	end
+	local group = LaunchGroup(list, target, {target}, MagpieMode(list[1]), approachPoint, false, false, nil, true)
+	C.SayWaiting({group})
+	approachPoint = nil
+	if #others > 0 then
+		Spring.GiveOrderToUnitArray(others, cmdID, params, opts and opts.coded or 0)
+	end
+	return true
 end
 
 function widget:GameOver()
@@ -2849,7 +3236,7 @@ local ACTIONS = {
 	revolver_recall = function() Recall() end,
 	revolver_ready = function() SelectReady() end,
 	revolver_approach = function() SetApproach() end,
-	revolver_pool = function() PoolPartial() end,
+	revolver_pool = function() PoolPartial(true) end,
 	revolver_calibrate = function() ToggleCalibration() end,
 	revolver_ledger = function() options.show_ledger.value = not options.show_ledger.value end,
 	revolver_menu = function() ToggleMenu() end,
@@ -3929,13 +4316,32 @@ function widget:DrawWorldPreUnit()
 		end
 	end
 	DrawPathWorld()
+	-- The approach being dragged, or waiting for the next attack: an arrow the way the run will fly, or a ring
+	-- where it will come in from. Planned approach routes of launched wings, ending in an arrow at the target.
+	gl.LineWidth(3)
+	gl.Color(COLOR.ready)
+	local ap = approachPoint
 	if approachDrag then
-		gl.LineWidth(3)
-		gl.Color(COLOR.ready)
-		gl.BeginEnd(GL.LINES, function()
-			gl.Vertex(approachDrag[1], (Spring.GetGroundHeight(approachDrag[1], approachDrag[2]) or 0) + 20, approachDrag[2])
-			gl.Vertex(approachDrag[3], (Spring.GetGroundHeight(approachDrag[3], approachDrag[4]) or 0) + 20, approachDrag[4])
-		end)
+		D.Arrow({{approachDrag[1], approachDrag[2]}, {approachDrag[3], approachDrag[4]}})
+	elseif ap and ap.x1 then
+		D.Arrow({{ap.x1, ap.z1}, {ap.x2, ap.z2}})
+	elseif ap and ap.x then
+		gl.DrawGroundCircle(ap.x, Spring.GetGroundHeight(ap.x, ap.z) or 0, ap.z, 90, 24)
+	end
+	gl.LineWidth(2)
+	gl.Color(COLOR.ready[1], COLOR.ready[2], COLOR.ready[3], 0.55)
+	for _, group in pairs(groups) do
+		local unitID = group.routes and next(group.units)
+		local route = unitID and group.routes[unitID]
+		local tx, _, tz = Spring.GetUnitPosition(group.target)
+		if route and #route > 0 and tx then
+			local points = {}
+			for i = 1, #route do
+				points[i] = route[i]
+			end
+			points[#points + 1] = {tx, tz}
+			D.Arrow(points)
+		end
 	end
 	gl.LineWidth(2)
 	gl.Color(COLOR.attacking)
@@ -3947,6 +4353,33 @@ function widget:DrawWorldPreUnit()
 	end
 	gl.LineWidth(1)
 	gl.Color(1, 1, 1, 1)
+end
+
+-- A line on the ground through points ({x, z} each) with an arrowhead at the last one.
+function D.Arrow(points)
+	local n = #points
+	if n < 2 then
+		return
+	end
+	local function V(x, z)
+		gl.Vertex(x, (Spring.GetGroundHeight(x, z) or 0) + 20, z)
+	end
+	local ax, az, bx, bz = points[n - 1][1], points[n - 1][2], points[n][1], points[n][2]
+	local d = Dist2D(ax, az, bx, bz)
+	gl.BeginEnd(GL.LINES, function()
+		for i = 2, n do
+			V(points[i - 1][1], points[i - 1][2])
+			V(points[i][1], points[i][2])
+		end
+		if d > 1 then
+			local ux, uz = (bx - ax)/d, (bz - az)/d
+			local size = min(160, d*0.4)
+			V(bx, bz)
+			V(bx - ux*size - uz*size*0.6, bz - uz*size + ux*size*0.6)
+			V(bx, bz)
+			V(bx - ux*size + uz*size*0.6, bz - uz*size - ux*size*0.6)
+		end
+	end)
 end
 
 function D.Label(x, y, z, str, size, c)
@@ -4294,11 +4727,11 @@ function widget:MouseRelease(x, y, button)
 	local x1, z1, x2, z2 = approachDrag[1], approachDrag[2], approachDrag[3], approachDrag[4]
 	local length = Dist2D(x1, z1, x2, z2)
 	if length > 80 then
-		approachPoint = {dx = (x2 - x1)/length, dz = (z2 - z1)/length}
-		Alert("Next Fire attacks along the dragged direction.")
+		approachPoint = {dx = (x2 - x1)/length, dz = (z2 - z1)/length, x1 = x1, z1 = z1, x2 = x2, z2 = z2}
+		Alert("The next attack flies the way the arrow points, coming in from its tail end.")
 	else
 		approachPoint = {x = x1, z = z1}
-		Alert("Next Fire comes from the clicked point.")
+		Alert("The next attack comes in from the marked point.")
 	end
 	approachMode, approachDrag = false, nil
 	return true
@@ -4375,12 +4808,12 @@ widget.RevolverInternals = {
 	Fire = function(...) return Fire(...) end, Mark = function() return Mark() end, ClearMarks = function() return ClearMarks() end,
 	Recall = function() return Recall() end, SelectWing = function(w) return SelectWing(w) end,
 	SelectReady = function() return SelectReady() end, SetApproach = function() return SetApproach() end,
-	PoolPartial = function() return PoolPartial() end, ToggleCalibration = function() return ToggleCalibration() end,
+	PoolPartial = function(byHand) return PoolPartial(byHand) end, ToggleCalibration = function() return ToggleCalibration() end,
 	ToggleMenu = function() return ToggleMenu() end, AssignSelected = function(w) return AssignSelected(w) end,
 	menuOpen = function() return menuOpen end, approachMode = function() return approachMode end,
 	routes = function() return routeCache end, losMemory = function() return losMemory end,
 	StaleCells = StaleCells, CellAge = CellAge, SweepLos = SweepLos, FleetAdvice = FleetAdvice, TargetTable = TargetTable,
 	StockEstimate = StockEstimate, ThreatLabel = ThreatLabel, MissilesCovering = MissilesCovering, FinishFrame = FinishFrame,
 	WholeWings = WholeWings, SetOption = SetOption, NextOptionValue = NextOptionValue, UpdateRoutes = UpdateRoutes,
-	Allies = Allies,
+	Allies = Allies, C = C,
 }
