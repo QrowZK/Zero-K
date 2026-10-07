@@ -225,7 +225,7 @@ options = {
 	},
 	ready_ammo = {name = 'Ready at ammo (%)', desc = 'A wing is chambered when its average ammo reaches this.', type = 'number', value = 90, min = 10, max = 100, step = 5, path = PATH.cylinder},
 	ready_health = {name = 'Ready at health (%)', desc = 'A wing is chambered when its average health reaches this.', type = 'number', value = 70, min = 10, max = 100, step = 5, path = PATH.cylinder},
-	spare_wing = Switch('Use wing F as the spare wing', 'Half-empty Magpies are gathered into wing F so full wings stay chambered.', false, PATH.cylinder),
+	spare_wing = Switch('Use wing F as the spare wing', 'Idle Magpies with ammo left below Ready at ammo are gathered into wing F so full wings stay chambered.', false, PATH.cylinder),
 	show_hud = Switch('Show cylinder', nil, true, PATH.cylinder),
 	hud_size = {name = 'Cylinder size (%)', desc = 'Also: drag the grip at the lower right of the cylinder.', type = 'number', value = 140, min = 60, max = 300, step = 10, path = PATH.cylinder},
 	wing_labels = Switch('Wing labels over Magpies', nil, true, PATH.cylinder),
