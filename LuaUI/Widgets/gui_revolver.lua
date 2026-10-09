@@ -7,7 +7,7 @@ function widget:GetInfo()
 		desc      = "Fleet manager for Magpies. Groups them into six wings, shows how many each target needs, keeps shots for ordered targets, balances pads, maps enemy anti-air, records every sortie, tells allies about attacks and lists their !air requests.",
 		author    = "QrowZK",
 		date      = "October 2026",
-		version   = "2026-10-07a",
+		version   = "2026-10-09a",
 		license   = "GNU GPL, v2 or later",
 		layer     = 10,
 		enabled   = false,
@@ -50,13 +50,14 @@ local magpieDefID = UnitDefNames.planesupport and UnitDefNames.planesupport.id
 local WING_COUNT = 6
 local WING_LETTER = {"A", "B", "C", "D", "E", "F"}
 
+-- Zero-K v1.14.10.3 figures, used only where the unit definitions say nothing
 local magpieStats = {
 	range = 580,
-	speed = 252,
+	speed = 234,
 	maxHealth = 900,
 	cost = 250,
-	bursts = 30,
-	damagePerBurst = 64,
+	bursts = 12,
+	damagePerBurst = 48,
 	rearmSeconds = 5,
 }
 
@@ -80,6 +81,16 @@ do
 				magpieStats.damagePerBurst = damage*(wd.salvoSize or 1)*(wd.projectiles or 1)
 			end
 		end
+	end
+end
+
+-- The kill tables hold for the Magpie they were simulated with. When this game's Magpie is a different one
+-- (a balance change since), Fire and the card use plain damage maths instead, and Revolver says so.
+do
+	local m = defs.magpie
+	if m and (m.shots ~= magpieStats.bursts or math.abs(m.burstDamage - magpieStats.damagePerBurst) > 0.5
+			or math.abs(m.speed - magpieStats.speed) > 1) then
+		C.staleTables = m.version
 	end
 end
 
@@ -903,7 +914,7 @@ end
 
 -- Fewest Magpies to kill a target type from the tables, or nil. Falls through to the next horizon if needed.
 local function TableNeed(defName, mode, horizon, slowOn)
-	local entry = BreakpointEntry(defName, mode)
+	local entry = not C.staleTables and BreakpointEntry(defName, mode)
 	if not entry then
 		return nil
 	end
@@ -1371,6 +1382,18 @@ end
 -- served, one per slot: flight to the pad, wait for a free slot, rearm, then repair to full health.
 local padQueue = {frame = -1000, eta = {}, parts = {}}
 
+-- Rearm time a Magpie on its way home or on a pad still needs. Since v1.14.10.2 a Magpie that lands with
+-- full ammo keeps it and only repairs; one that has fired drops what it has left as it touches down (the
+-- pad marks it repairing until then) and rearms in full.
+function C.RearmLeft(mag)
+	if mag.noAmmo == 2 then
+		return max(0, magpieStats.rearmSeconds - (frame - (mag.rearmStart or frame))/30)
+	elseif (mag.noAmmo == 0 or mag.noAmmo == 3) and mag.ammo >= 1 then
+		return 0
+	end
+	return magpieStats.rearmSeconds
+end
+
 local function PadQueue()
 	if frame - padQueue.frame < 15 and padQueue.frame >= 0 then
 		return padQueue
@@ -1387,12 +1410,7 @@ local function PadQueue()
 				local pad = pads[padID]
 				local onPad = (mag.noAmmo == 2 or mag.noAmmo == 3)
 				local flight = onPad and 0 or (UnitDist2D(unitID, padID) or 0)/magpieStats.speed
-				local rearm = magpieStats.rearmSeconds
-				if mag.noAmmo == 2 then
-					rearm = max(0, rearm - (frame - (mag.rearmStart or frame))/30)
-				elseif mag.noAmmo == 3 then
-					rearm = 0
-				end
+				local rearm = C.RearmLeft(mag)
 				local repair = RepairSeconds(mag, pad)
 				byPad[padID] = byPad[padID] or {}
 				local list = byPad[padID]
@@ -1442,7 +1460,7 @@ local function ReadyETA(mag)
 		return max(0, (readyFrame - frame)/30)
 	end
 	-- No pad at all: rearm and repair at the default rate once it gets one.
-	return magpieStats.rearmSeconds + RepairSeconds(mag)
+	return C.RearmLeft(mag) + RepairSeconds(mag)
 end
 
 -- Seconds until the whole wing is ready, and the breakdown for the Magpie that takes longest.
@@ -1991,7 +2009,9 @@ function C.Unhold(unitID)
 	end
 end
 
--- Take a Magpie out of its attack group, giving back its fire state.
+-- Take a Magpie out of its attack group, giving back its fire state. The fire state is queued: it takes effect
+-- at once either way, and the pad gadget cancels a landing or repair for any order that is not queued (the
+-- Magpie may have been sent to a pad).
 function C.Drop(unitID)
 	local mag = magpies[unitID]
 	local group = mag and mag.group and groups[mag.group]
@@ -2004,7 +2024,7 @@ function C.Drop(unitID)
 	if mag then
 		mag.group = nil
 		if mag.savedFire ~= nil then
-			Spring.GiveOrderToUnit(unitID, C.FIRE_STATE, {mag.savedFire}, 0)
+			Spring.GiveOrderToUnit(unitID, C.FIRE_STATE, {mag.savedFire}, C.OPT_SHIFT)
 			mag.savedFire = nil
 		end
 	end
@@ -2694,6 +2714,17 @@ local function UpdateMagpie(unitID, mag)
 		end
 	end
 
+	-- Sent to a pad with ammo left (its retreat setting, a rearm hotkey, an order by hand) or landed on one: it
+	-- leaves its attack, so a kill does not send it back in and Fire can use it again once it is rearmed. For
+	-- 3 s after the launch the order the attack replaced may still show, so that is left alone.
+	local group = mag.group and groups[mag.group]
+	if group and frame - group.launchFrame >= 90 then
+		local cmdID = Spring.GetUnitCurrentCommand(unitID)
+		if noAmmo ~= 0 or cmdID == C.REARM or cmdID == C.FIND_PAD then
+			C.Drop(unitID)
+		end
+	end
+
 	-- Attacks ordered by hand (not through Fire): remember which unit the Magpie is attacking. When it
 	-- is left with nothing to do and that unit is dead, the target was killed: kill confirm sends it home.
 	if not mag.group and noAmmo == 0 then
@@ -2801,7 +2832,9 @@ local function UpdateRotation()
 			for unitID in pairs(group.units) do
 				ammo, n = ammo + magpies[unitID].ammo, n + 1
 			end
-			if n == 0 or ammo/n < 0.15 then
+			-- The next wing goes once the average Magpie has about a pass and a half of strafing left (4.5 of
+			-- 30 bursts before v1.14.10.2, 6 of 12 since), so it arrives about as this one runs dry.
+			if n == 0 or ammo/n*magpieStats.bursts < 1.5*defs.burstsPerPass.strafe then
 				group.rotated = true
 				Fire({group.target}, true)
 			end
@@ -3255,6 +3288,9 @@ function widget:Initialize()
 	myTeamID = Spring.GetMyTeamID()
 	myAllyTeamID = Spring.GetMyAllyTeamID()
 	frame = Spring.GetGameFrame()
+	if C.staleTables then
+		Alert("The kill tables are for the v" .. C.staleTables .. " Magpie, and this game's Magpie is different: Fire works out how many to send from plain damage maths.", "staletables")
+	end
 
 	local units = Spring.GetTeamUnits(myTeamID) or {}
 	for i = 1, #units do
@@ -3620,7 +3656,9 @@ function CardLines(target)
 	local lines = {ud.humanName or ud.name}
 	local cells
 	local entryS = BreakpointEntry(ud.name, "strafe")
-	if entryS then
+	if entryS and C.staleTables then
+		lines[#lines + 1] = "Kill table is for the v" .. C.staleTables .. " Magpie, not this one."
+	elseif entryS then
 		cells = {}
 		local function cell(mode, p)
 			local entry = BreakpointEntry(ud.name, mode)
@@ -4797,7 +4835,7 @@ widget.RevolverInternals = {
 	alerts = function() return alerts end,
 	calibration = function() return calibration end,
 	approach = function() return approachPoint end,
-	magpieStats = magpieStats,
+	magpieStats = magpieStats, defs = defs,
 	aaDefs = aaDefs,
 	padDefs = padDefs,
 	ReadAmmo = ReadAmmo, WingSummary = WingSummary, PickWing = PickWing,
